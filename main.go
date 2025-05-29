@@ -18,13 +18,13 @@ type ServerConfig struct {
 }
 
 type ForwardConfig struct {
-	ServerName  string
-	RemoteIP    string
-	RemotePort  string
-	LocalIP     string
-	LocalPort   string
-	Direction   string
-	SSHConfig   *ServerConfig
+	ServerName string
+	RemoteIP   string
+	RemotePort string
+	LocalIP    string
+	LocalPort  string
+	Direction  string
+	SSHConfig  *ServerConfig
 }
 
 func main() {
@@ -106,6 +106,10 @@ func connectAndForward(config *ForwardConfig) error {
 		err = handleRemotePortForward(conn, config)
 	case "local":
 		err = handleLocalPortForward(conn, config)
+	case "socks5":
+		err = handleSocks5Proxy(conn, config)
+	case "reverse-socks5":
+		err = handleReverseSocks5Proxy(conn, config)
 	default:
 		return fmt.Errorf("invalid direction: %s", config.Direction)
 	}
@@ -171,6 +175,255 @@ func handleForwardingConnection(incomingConn net.Conn, targetIP, targetPort stri
 
 	go copyConn(targetConn, incomingConn)
 	go copyConn(incomingConn, targetConn)
+}
+
+func handleSocks5Proxy(conn *ssh.Client, config *ForwardConfig) error {
+	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%s", config.LocalIP, config.LocalPort))
+	if err != nil {
+		return fmt.Errorf("failed to listen on local address: %v", err)
+	}
+	defer listener.Close()
+
+	log.Printf("SOCKS5 proxy listening on %s:%s", config.LocalIP, config.LocalPort)
+
+	for {
+		clientConn, err := listener.Accept()
+		if err != nil {
+			return fmt.Errorf("failed to accept connection: %v", err)
+		}
+
+		go handleSocks5Connection(clientConn, conn)
+	}
+}
+
+func handleSocks5Connection(clientConn net.Conn, sshConn *ssh.Client) {
+	defer clientConn.Close()
+
+	// Create a SOCKS5 server that uses the SSH connection for dialing
+	socks5Server := &socks5Server{sshConn: sshConn}
+
+	// Handle the SOCKS5 protocol
+	err := socks5Server.handleConnection(clientConn)
+	if err != nil {
+		log.Printf("SOCKS5 connection error: %v", err)
+	}
+}
+
+type socks5Server struct {
+	sshConn *ssh.Client
+}
+
+func (s *socks5Server) handleConnection(clientConn net.Conn) error {
+	// Read SOCKS5 version and number of authentication methods
+	buf := make([]byte, 256)
+	n, err := clientConn.Read(buf)
+	if err != nil {
+		return fmt.Errorf("failed to read SOCKS5 greeting: %v", err)
+	}
+
+	if n < 2 || buf[0] != 0x05 {
+		return fmt.Errorf("invalid SOCKS5 version")
+	}
+
+	// Send "no authentication required" response
+	_, err = clientConn.Write([]byte{0x05, 0x00})
+	if err != nil {
+		return fmt.Errorf("failed to send auth response: %v", err)
+	}
+
+	// Read connection request
+	n, err = clientConn.Read(buf)
+	if err != nil {
+		return fmt.Errorf("failed to read connection request: %v", err)
+	}
+
+	if n < 4 || buf[0] != 0x05 || buf[1] != 0x01 {
+		return fmt.Errorf("invalid SOCKS5 connection request")
+	}
+
+	// Parse target address
+	var targetAddr string
+	var targetPort uint16
+
+	switch buf[3] { // Address type
+	case 0x01: // IPv4
+		if n < 10 {
+			return fmt.Errorf("invalid IPv4 address length")
+		}
+		targetAddr = fmt.Sprintf("%d.%d.%d.%d", buf[4], buf[5], buf[6], buf[7])
+		targetPort = uint16(buf[8])<<8 | uint16(buf[9])
+	case 0x03: // Domain name
+		if n < 5 {
+			return fmt.Errorf("invalid domain name length")
+		}
+		domainLen := int(buf[4])
+		if n < 5+domainLen+2 {
+			return fmt.Errorf("incomplete domain name")
+		}
+		targetAddr = string(buf[5 : 5+domainLen])
+		targetPort = uint16(buf[5+domainLen])<<8 | uint16(buf[5+domainLen+1])
+	case 0x04: // IPv6
+		if n < 22 {
+			return fmt.Errorf("invalid IPv6 address length")
+		}
+		// IPv6 address parsing
+		ipv6 := net.IP(buf[4:20])
+		targetAddr = ipv6.String()
+		targetPort = uint16(buf[20])<<8 | uint16(buf[21])
+	default:
+		return fmt.Errorf("unsupported address type: %d", buf[3])
+	}
+
+	target := fmt.Sprintf("%s:%d", targetAddr, targetPort)
+
+	// Connect to target through SSH tunnel
+	remoteConn, err := s.sshConn.Dial("tcp", target)
+	if err != nil {
+		// Send connection failed response
+		response := []byte{0x05, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+		clientConn.Write(response)
+		return fmt.Errorf("failed to connect to target %s: %v", target, err)
+	}
+	defer remoteConn.Close()
+
+	// Send success response
+	response := []byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	_, err = clientConn.Write(response)
+	if err != nil {
+		return fmt.Errorf("failed to send success response: %v", err)
+	}
+
+	log.Printf("SOCKS5 connection established to %s", target)
+
+	// Start bidirectional data transfer
+	go copyConn(clientConn, remoteConn)
+	go copyConn(remoteConn, clientConn)
+
+	return nil
+}
+
+func handleReverseSocks5Proxy(conn *ssh.Client, config *ForwardConfig) error {
+	// Listen on remote server
+	listener, err := conn.Listen("tcp", fmt.Sprintf("%s:%s", config.RemoteIP, config.RemotePort))
+	if err != nil {
+		return fmt.Errorf("failed to listen on remote server: %v", err)
+	}
+	defer listener.Close()
+
+	log.Printf("Reverse SOCKS5 proxy listening on remote %s:%s", config.RemoteIP, config.RemotePort)
+
+	for {
+		remoteConn, err := listener.Accept()
+		if err != nil {
+			return fmt.Errorf("failed to accept connection: %v", err)
+		}
+
+		go handleReverseSocks5Connection(remoteConn)
+	}
+}
+
+func handleReverseSocks5Connection(remoteConn net.Conn) {
+	defer remoteConn.Close()
+
+	// Create a reverse SOCKS5 server that dials to local network
+	reverseSocks5Server := &reverseSocks5Server{}
+
+	// Handle the SOCKS5 protocol
+	err := reverseSocks5Server.handleConnection(remoteConn)
+	if err != nil {
+		log.Printf("Reverse SOCKS5 connection error: %v", err)
+	}
+}
+
+type reverseSocks5Server struct{}
+
+func (s *reverseSocks5Server) handleConnection(clientConn net.Conn) error {
+	// Read SOCKS5 version and number of authentication methods
+	buf := make([]byte, 256)
+	n, err := clientConn.Read(buf)
+	if err != nil {
+		return fmt.Errorf("failed to read SOCKS5 greeting: %v", err)
+	}
+
+	if n < 2 || buf[0] != 0x05 {
+		return fmt.Errorf("invalid SOCKS5 version")
+	}
+
+	// Send "no authentication required" response
+	_, err = clientConn.Write([]byte{0x05, 0x00})
+	if err != nil {
+		return fmt.Errorf("failed to send auth response: %v", err)
+	}
+
+	// Read connection request
+	n, err = clientConn.Read(buf)
+	if err != nil {
+		return fmt.Errorf("failed to read connection request: %v", err)
+	}
+
+	if n < 4 || buf[0] != 0x05 || buf[1] != 0x01 {
+		return fmt.Errorf("invalid SOCKS5 connection request")
+	}
+
+	// Parse target address
+	var targetAddr string
+	var targetPort uint16
+
+	switch buf[3] { // Address type
+	case 0x01: // IPv4
+		if n < 10 {
+			return fmt.Errorf("invalid IPv4 address length")
+		}
+		targetAddr = fmt.Sprintf("%d.%d.%d.%d", buf[4], buf[5], buf[6], buf[7])
+		targetPort = uint16(buf[8])<<8 | uint16(buf[9])
+	case 0x03: // Domain name
+		if n < 5 {
+			return fmt.Errorf("invalid domain name length")
+		}
+		domainLen := int(buf[4])
+		if n < 5+domainLen+2 {
+			return fmt.Errorf("incomplete domain name")
+		}
+		targetAddr = string(buf[5 : 5+domainLen])
+		targetPort = uint16(buf[5+domainLen])<<8 | uint16(buf[5+domainLen+1])
+	case 0x04: // IPv6
+		if n < 22 {
+			return fmt.Errorf("invalid IPv6 address length")
+		}
+		// IPv6 address parsing
+		ipv6 := net.IP(buf[4:20])
+		targetAddr = ipv6.String()
+		targetPort = uint16(buf[20])<<8 | uint16(buf[21])
+	default:
+		return fmt.Errorf("unsupported address type: %d", buf[3])
+	}
+
+	target := fmt.Sprintf("%s:%d", targetAddr, targetPort)
+
+	// Connect to target through local network (direct connection)
+	localConn, err := net.Dial("tcp", target)
+	if err != nil {
+		// Send connection failed response
+		response := []byte{0x05, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+		clientConn.Write(response)
+		return fmt.Errorf("failed to connect to local target %s: %v", target, err)
+	}
+	defer localConn.Close()
+
+	// Send success response
+	response := []byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	_, err = clientConn.Write(response)
+	if err != nil {
+		return fmt.Errorf("failed to send success response: %v", err)
+	}
+
+	log.Printf("Reverse SOCKS5 connection established to local %s", target)
+
+	// Start bidirectional data transfer
+	go copyConn(clientConn, localConn)
+	go copyConn(localConn, clientConn)
+
+	return nil
 }
 
 func copyConn(dst io.WriteCloser, src io.ReadCloser) {
