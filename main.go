@@ -17,6 +17,10 @@ type ServerConfig struct {
 	Password string
 }
 
+type CommonConfig struct {
+	Debug bool
+}
+
 type ForwardConfig struct {
 	ServerName string
 	RemoteIP   string
@@ -36,11 +40,18 @@ func main() {
 		log.Fatalf("Failed to load config file: %v", err)
 	}
 
+	// Parse common configuration
+	var commonConfig CommonConfig
+	if cfg.HasSection("common") {
+		commonSection := cfg.Section("common")
+		commonConfig.Debug = commonSection.Key("debug").MustBool(false)
+	}
+
 	servers := make(map[string]*ServerConfig)
 	var forwardConfigs []*ForwardConfig
 
 	for _, section := range cfg.Sections() {
-		if section.Name() == "DEFAULT" {
+		if section.Name() == "DEFAULT" || section.Name() == "common" {
 			continue
 		}
 
@@ -68,7 +79,7 @@ func main() {
 	for _, fc := range forwardConfigs {
 		if sshConfig, ok := servers[fc.ServerName]; ok {
 			fc.SSHConfig = sshConfig
-			go handleConnection(fc)
+			go handleConnection(fc, &commonConfig)
 		} else {
 			log.Printf("Warning: No server configuration found for %s", fc.ServerName)
 		}
@@ -78,9 +89,9 @@ func main() {
 	select {}
 }
 
-func handleConnection(config *ForwardConfig) {
+func handleConnection(config *ForwardConfig, commonConfig *CommonConfig) {
 	for {
-		err := connectAndForward(config)
+		err := connectAndForward(config, commonConfig)
 		if err != nil {
 			log.Printf("Error in connection for %s: %v. Retrying in 30 seconds...", config.ServerName, err)
 			time.Sleep(30 * time.Second)
@@ -88,7 +99,7 @@ func handleConnection(config *ForwardConfig) {
 	}
 }
 
-func connectAndForward(config *ForwardConfig) error {
+func connectAndForward(config *ForwardConfig, commonConfig *CommonConfig) error {
 	sshConfig := &ssh.ClientConfig{
 		User: config.SSHConfig.User,
 		Auth: []ssh.AuthMethod{
@@ -108,13 +119,13 @@ func connectAndForward(config *ForwardConfig) error {
 
 	switch config.Direction {
 	case "remote":
-		err = handleRemotePortForward(conn, config)
+		err = handleRemotePortForward(conn, config, commonConfig)
 	case "local":
-		err = handleLocalPortForward(conn, config)
+		err = handleLocalPortForward(conn, config, commonConfig)
 	case "socks5":
-		err = handleSocks5Proxy(conn, config)
+		err = handleSocks5Proxy(conn, config, commonConfig)
 	case "reverse-socks5":
-		err = handleReverseSocks5Proxy(conn, config)
+		err = handleReverseSocks5Proxy(conn, config, commonConfig)
 	default:
 		return fmt.Errorf("invalid direction: %s", config.Direction)
 	}
@@ -122,7 +133,7 @@ func connectAndForward(config *ForwardConfig) error {
 	return err
 }
 
-func handleRemotePortForward(conn *ssh.Client, config *ForwardConfig) error {
+func handleRemotePortForward(conn *ssh.Client, config *ForwardConfig, commonConfig *CommonConfig) error {
 	listener, err := conn.Listen("tcp", fmt.Sprintf("%s:%s", config.RemoteIP, config.RemotePort))
 	if err != nil {
 		return fmt.Errorf("failed to listen on remote server: %v", err)
@@ -137,11 +148,11 @@ func handleRemotePortForward(conn *ssh.Client, config *ForwardConfig) error {
 			return fmt.Errorf("failed to accept connection: %v", err)
 		}
 
-		go handleForwardingConnection(remoteConn, config.LocalIP, config.LocalPort)
+		go handleForwardingConnection(remoteConn, config.LocalIP, config.LocalPort, commonConfig)
 	}
 }
 
-func handleLocalPortForward(conn *ssh.Client, config *ForwardConfig) error {
+func handleLocalPortForward(conn *ssh.Client, config *ForwardConfig, commonConfig *CommonConfig) error {
 	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%s", config.LocalIP, config.LocalPort))
 	if err != nil {
 		return fmt.Errorf("failed to listen on local address: %v", err)
@@ -164,13 +175,13 @@ func handleLocalPortForward(conn *ssh.Client, config *ForwardConfig) error {
 				return
 			}
 
-			go copyConn(localConn, remoteConn)
-			go copyConn(remoteConn, localConn)
+			go copyConn(localConn, remoteConn, commonConfig)
+			go copyConn(remoteConn, localConn, commonConfig)
 		}()
 	}
 }
 
-func handleForwardingConnection(incomingConn net.Conn, targetIP, targetPort string) {
+func handleForwardingConnection(incomingConn net.Conn, targetIP, targetPort string, commonConfig *CommonConfig) {
 	targetConn, err := net.Dial("tcp", fmt.Sprintf("%s:%s", targetIP, targetPort))
 	if err != nil {
 		log.Printf("Failed to connect to target address: %v", err)
@@ -178,11 +189,11 @@ func handleForwardingConnection(incomingConn net.Conn, targetIP, targetPort stri
 		return
 	}
 
-	go copyConn(targetConn, incomingConn)
-	go copyConn(incomingConn, targetConn)
+	go copyConn(targetConn, incomingConn, commonConfig)
+	go copyConn(incomingConn, targetConn, commonConfig)
 }
 
-func handleSocks5Proxy(conn *ssh.Client, config *ForwardConfig) error {
+func handleSocks5Proxy(conn *ssh.Client, config *ForwardConfig, commonConfig *CommonConfig) error {
 	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%s", config.LocalIP, config.LocalPort))
 	if err != nil {
 		return fmt.Errorf("failed to listen on local address: %v", err)
@@ -197,11 +208,11 @@ func handleSocks5Proxy(conn *ssh.Client, config *ForwardConfig) error {
 			return fmt.Errorf("failed to accept connection: %v", err)
 		}
 
-		go handleSocks5Connection(clientConn, conn, config)
+		go handleSocks5Connection(clientConn, conn, config, commonConfig)
 	}
 }
 
-func handleSocks5Connection(clientConn net.Conn, sshConn *ssh.Client, config *ForwardConfig) {
+func handleSocks5Connection(clientConn net.Conn, sshConn *ssh.Client, config *ForwardConfig, commonConfig *CommonConfig) {
 	defer clientConn.Close()
 
 	// Create a SOCKS5 server that uses the SSH connection for dialing
@@ -211,7 +222,7 @@ func handleSocks5Connection(clientConn net.Conn, sshConn *ssh.Client, config *Fo
 	}
 
 	// Handle the SOCKS5 protocol
-	err := socks5Server.handleConnection(clientConn)
+	err := socks5Server.handleConnection(clientConn, commonConfig)
 	if err != nil {
 		log.Printf("SOCKS5 connection error: %v", err)
 	}
@@ -222,7 +233,7 @@ type socks5Server struct {
 	config  *ForwardConfig
 }
 
-func (s *socks5Server) handleConnection(clientConn net.Conn) error {
+func (s *socks5Server) handleConnection(clientConn net.Conn, commonConfig *CommonConfig) error {
 	// Read SOCKS5 version and number of authentication methods
 	buf := make([]byte, 256)
 	n, err := clientConn.Read(buf)
@@ -276,7 +287,7 @@ func (s *socks5Server) handleConnection(clientConn net.Conn) error {
 
 	// Handle authentication if required
 	if selectedMethod == 0x02 {
-		err = s.handleUsernamePasswordAuth(clientConn)
+		err = s.handleUsernamePasswordAuth(clientConn, commonConfig)
 		if err != nil {
 			return fmt.Errorf("authentication failed: %v", err)
 		}
@@ -344,16 +355,30 @@ func (s *socks5Server) handleConnection(clientConn net.Conn) error {
 		return fmt.Errorf("failed to send success response: %v", err)
 	}
 
-	log.Printf("SOCKS5 connection established to %s", target)
+	if commonConfig.Debug {
+		log.Printf("SOCKS5 connection established to %s", target)
+	}
 
-	// Start bidirectional data transfer
-	go copyConn(clientConn, remoteConn)
-	go copyConn(remoteConn, clientConn)
+	// Start bidirectional data transfer and wait for completion
+	done := make(chan bool, 2)
+
+	go func() {
+		copyConn(clientConn, remoteConn, commonConfig)
+		done <- true
+	}()
+
+	go func() {
+		copyConn(remoteConn, clientConn, commonConfig)
+		done <- true
+	}()
+
+	// Wait for either direction to complete
+	<-done
 
 	return nil
 }
 
-func (s *socks5Server) handleUsernamePasswordAuth(clientConn net.Conn) error {
+func (s *socks5Server) handleUsernamePasswordAuth(clientConn net.Conn, commonConfig *CommonConfig) error {
 	buf := make([]byte, 256)
 	n, err := clientConn.Read(buf)
 	if err != nil {
@@ -385,7 +410,9 @@ func (s *socks5Server) handleUsernamePasswordAuth(clientConn net.Conn) error {
 		if err != nil {
 			return fmt.Errorf("failed to send auth success: %v", err)
 		}
-		log.Printf("SOCKS5 authentication successful for user: %s", username)
+		if commonConfig.Debug {
+			log.Printf("SOCKS5 authentication successful for user: %s", username)
+		}
 		return nil
 	} else {
 		// Authentication failed
@@ -397,7 +424,7 @@ func (s *socks5Server) handleUsernamePasswordAuth(clientConn net.Conn) error {
 	}
 }
 
-func handleReverseSocks5Proxy(conn *ssh.Client, config *ForwardConfig) error {
+func handleReverseSocks5Proxy(conn *ssh.Client, config *ForwardConfig, commonConfig *CommonConfig) error {
 	// Listen on remote server
 	listener, err := conn.Listen("tcp", fmt.Sprintf("%s:%s", config.RemoteIP, config.RemotePort))
 	if err != nil {
@@ -413,18 +440,18 @@ func handleReverseSocks5Proxy(conn *ssh.Client, config *ForwardConfig) error {
 			return fmt.Errorf("failed to accept connection: %v", err)
 		}
 
-		go handleReverseSocks5Connection(remoteConn, config)
+		go handleReverseSocks5Connection(remoteConn, config, commonConfig)
 	}
 }
 
-func handleReverseSocks5Connection(remoteConn net.Conn, config *ForwardConfig) {
+func handleReverseSocks5Connection(remoteConn net.Conn, config *ForwardConfig, commonConfig *CommonConfig) {
 	defer remoteConn.Close()
 
 	// Create a reverse SOCKS5 server that dials to local network
 	reverseSocks5Server := &reverseSocks5Server{config: config}
 
 	// Handle the SOCKS5 protocol
-	err := reverseSocks5Server.handleConnection(remoteConn)
+	err := reverseSocks5Server.handleConnection(remoteConn, commonConfig)
 	if err != nil {
 		log.Printf("Reverse SOCKS5 connection error: %v", err)
 	}
@@ -434,7 +461,7 @@ type reverseSocks5Server struct {
 	config *ForwardConfig
 }
 
-func (s *reverseSocks5Server) handleConnection(clientConn net.Conn) error {
+func (s *reverseSocks5Server) handleConnection(clientConn net.Conn, commonConfig *CommonConfig) error {
 	// Read SOCKS5 version and number of authentication methods
 	buf := make([]byte, 256)
 	n, err := clientConn.Read(buf)
@@ -488,7 +515,7 @@ func (s *reverseSocks5Server) handleConnection(clientConn net.Conn) error {
 
 	// Handle authentication if required
 	if selectedMethod == 0x02 {
-		err = s.handleUsernamePasswordAuth(clientConn)
+		err = s.handleUsernamePasswordAuth(clientConn, commonConfig)
 		if err != nil {
 			return fmt.Errorf("authentication failed: %v", err)
 		}
@@ -539,13 +566,28 @@ func (s *reverseSocks5Server) handleConnection(clientConn net.Conn) error {
 
 	target := fmt.Sprintf("%s:%d", targetAddr, targetPort)
 
-	// Connect to target through local network (direct connection)
-	localConn, err := net.Dial("tcp", target)
+	// Add DNS resolution debugging for domain names
+	if buf[3] == 0x03 { // Domain name
+		_, err := net.LookupIP(targetAddr)
+		if err != nil {
+			log.Printf("Reverse SOCKS5 DNS resolution failed for %s: %v", targetAddr, err)
+		}
+	}
+
+	// For reverse SOCKS5, we need to connect through the local machine's internet connection
+	// This allows the remote server to access the internet through our local connection
+	dialer := &net.Dialer{
+		Timeout: 30 * time.Second,
+	}
+	localConn, err := dialer.Dial("tcp", target)
 	if err != nil {
+		if commonConfig.Debug {
+			log.Printf("Reverse SOCKS5 connection failed to %s: %v", target, err)
+		}
 		// Send connection failed response
 		response := []byte{0x05, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 		clientConn.Write(response)
-		return fmt.Errorf("failed to connect to local target %s: %v", target, err)
+		return fmt.Errorf("failed to connect to target %s through local connection: %v", target, err)
 	}
 	defer localConn.Close()
 
@@ -556,16 +598,30 @@ func (s *reverseSocks5Server) handleConnection(clientConn net.Conn) error {
 		return fmt.Errorf("failed to send success response: %v", err)
 	}
 
-	log.Printf("Reverse SOCKS5 connection established to local %s", target)
+	if commonConfig.Debug {
+		log.Printf("Reverse SOCKS5 connection established: %s", target)
+	}
 
-	// Start bidirectional data transfer
-	go copyConn(clientConn, localConn)
-	go copyConn(localConn, clientConn)
+	// Start bidirectional data transfer and wait for completion
+	done := make(chan bool, 2)
+
+	go func() {
+		copyConn(clientConn, localConn, commonConfig)
+		done <- true
+	}()
+
+	go func() {
+		copyConn(localConn, clientConn, commonConfig)
+		done <- true
+	}()
+
+	// Wait for either direction to complete
+	<-done
 
 	return nil
 }
 
-func (s *reverseSocks5Server) handleUsernamePasswordAuth(clientConn net.Conn) error {
+func (s *reverseSocks5Server) handleUsernamePasswordAuth(clientConn net.Conn, commonConfig *CommonConfig) error {
 	buf := make([]byte, 256)
 	n, err := clientConn.Read(buf)
 	if err != nil {
@@ -597,7 +653,9 @@ func (s *reverseSocks5Server) handleUsernamePasswordAuth(clientConn net.Conn) er
 		if err != nil {
 			return fmt.Errorf("failed to send auth success: %v", err)
 		}
-		log.Printf("Reverse SOCKS5 authentication successful for user: %s", username)
+		if commonConfig.Debug {
+			log.Printf("Reverse SOCKS5 authentication successful for user: %s", username)
+		}
 		return nil
 	} else {
 		// Authentication failed
@@ -609,8 +667,12 @@ func (s *reverseSocks5Server) handleUsernamePasswordAuth(clientConn net.Conn) er
 	}
 }
 
-func copyConn(dst io.WriteCloser, src io.ReadCloser) {
+func copyConn(dst io.WriteCloser, src io.ReadCloser, commonConfig *CommonConfig) {
 	defer dst.Close()
 	defer src.Close()
-	io.Copy(dst, src)
+
+	_, err := io.Copy(dst, src)
+	if err != nil && err != io.EOF && commonConfig.Debug {
+		log.Printf("Data transfer error: %v", err)
+	}
 }

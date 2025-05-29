@@ -12,6 +12,9 @@ Run spf with a config.ini in same directory.
 ## Configuration
 
 ```ini
+[common]
+debug=false
+
 [serverA]
 server=192.168.111.92
 user=root
@@ -62,6 +65,31 @@ socks5User=reverseuser
 socks5Pass=reversepass
 ```
 
+## Configuration Sections
+
+### [common] Section
+Global configuration options that affect all connections:
+
+- **debug**: Enable/disable debug logging for SOCKS5 connections (default: false)
+  - `true`: Shows detailed SOCKS5 connection logs, authentication success/failure, and data transfer errors
+  - `false`: Minimal logging for production use
+
+### Server Sections
+Define SSH server credentials (e.g., `[serverA]`):
+
+- **server**: SSH server hostname or IP address
+- **user**: SSH username
+- **password**: SSH password
+
+### Forward Sections
+Define port forwarding configurations:
+
+- **server**: Reference to server section name
+- **direction**: Type of forwarding (local, remote, socks5, reverse-socks5)
+- **localIP/localPort**: Local address and port
+- **remoteIP/remotePort**: Remote address and port (not used for socks5)
+- **socks5User/socks5Pass**: Optional SOCKS5 authentication credentials
+
 ## Usage Examples
 
 ### Local Port Forwarding
@@ -97,8 +125,20 @@ SOCKS5 authentication is optional and controlled by the presence of `socks5User`
 
 The authentication uses the standard SOCKS5 username/password authentication method (RFC 1929).
 
+## Debug Logging
+
+Set `debug=true` in the `[common]` section to enable detailed SOCKS5 logging:
+
+- Connection establishment and failure details
+- Authentication success/failure messages
+- DNS resolution issues
+- Data transfer errors
+
+**Production Use**: Keep `debug=false` for minimal logging and better SSL/TLS compatibility.
+
 ## Notes
 
 - For SOCKS5 direction, `remoteIP` and `remotePort` are not needed as the target is determined dynamically by the SOCKS5 protocol.
 - For reverse-socks5 direction, `localIP` and `localPort` are not needed as connections are made directly to the local network from the remote server.
 - Authentication credentials are transmitted securely through the encrypted SSH tunnel.
+- Debug logging should be disabled in production for optimal SSL/TLS performance.
