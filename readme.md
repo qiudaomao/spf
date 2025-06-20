@@ -2,6 +2,45 @@
 
 Run spf with a config.ini in same directory.
 
+## Windows System Tray Version
+
+For Windows users, SPF can run as a system tray application instead of a terminal window.
+
+### Building for Windows
+
+1. **Prerequisites**: Install Go and ensure you have a C compiler (like MinGW or Visual Studio Build Tools)
+
+2. **Build the Windows version**:
+   ```cmd
+   build_windows.bat
+   ```
+   Or manually:
+   ```cmd
+   set GOOS=windows
+   set GOARCH=amd64
+   set CGO_ENABLED=1
+   go build -ldflags="-s -w -H windowsgui" -o spf.exe .
+   ```
+
+3. **Icon**: Place an `icon.png` file in the same directory as `spf.exe` for the system tray icon
+
+### Running on Windows
+
+1. **Double-click** `spf.exe` to start the application
+2. **System tray icon** will appear in the notification area
+3. **Right-click** the tray icon to access:
+   - Status information
+   - Configuration details for each forward
+   - Reload configuration
+   - Quit application
+
+### Windows Features
+
+- **No terminal window**: Runs silently in the background
+- **System tray integration**: Easy access to status and controls
+- **Automatic restart**: Connections automatically reconnect if lost
+- **Configuration reload**: Update config.ini without restarting
+
 ## Supported Directions
 
 - **local**: Local port forwarding (SSH -L)
