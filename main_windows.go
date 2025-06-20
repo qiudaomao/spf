@@ -10,12 +10,10 @@ import (
 	"log"
 	"net"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/getlantern/systray"
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/sys/windows/registry"
 	"gopkg.in/ini.v1"
 )
 
@@ -162,18 +160,6 @@ func onReady() {
 			go handleMenuItemClick(menuItem, fc)
 		}
 	}
-
-	// systray.AddSeparator()
-
-	// Add startup management menu items
-	/*
-	startupEnabled := isStartupEnabled()
-	startupMenuItem := systray.AddMenuItem("Startup: Disabled", "Toggle Startup")
-	if startupEnabled {
-		startupMenuItem.SetTitle("Startup: Enabled")
-	}
-	go handleStartupMenuItemClick(startupMenuItem)
-
 
 	systray.AddSeparator()
 	showLogMenuItem := systray.AddMenuItem("Show Log", "Show Log")
@@ -820,84 +806,6 @@ func (s *reverseSocks5Server) handleUsernamePasswordAuth(clientConn net.Conn, co
 			return fmt.Errorf("failed to send auth failure: %v", err)
 		}
 		return fmt.Errorf("invalid credentials for user: %s", username)
-	}
-}
-
-// Startup management functions
-func isStartupEnabled() bool {
-	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.QUERY_VALUE)
-	if err != nil {
-		log.Printf("Failed to open registry key: %v", err)
-		return false
-	}
-	defer key.Close()
-
-	appName := "SSH Port Forwarder"
-	_, _, err = key.GetStringValue(appName)
-	return err == nil
-}
-
-func setStartupEnabled(enabled bool) error {
-	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE)
-	if err != nil {
-		return fmt.Errorf("failed to open registry key: %v", err)
-	}
-	defer key.Close()
-
-	appName := "SSH Port Forwarder"
-
-	if enabled {
-		// Get the current executable path
-		exePath, err := os.Executable()
-		if err != nil {
-			return fmt.Errorf("failed to get executable path: %v", err)
-		}
-
-		// Convert to absolute path
-		absPath, err := filepath.Abs(exePath)
-		if err != nil {
-			return fmt.Errorf("failed to get absolute path: %v", err)
-		}
-
-		// Set the registry value
-		err = key.SetStringValue(appName, absPath)
-		if err != nil {
-			return fmt.Errorf("failed to set registry value: %v", err)
-		}
-
-		log.Printf("Startup enabled: %s", absPath)
-	} else {
-		// Remove the registry value
-		err = key.DeleteValue(appName)
-		if err != nil {
-			return fmt.Errorf("failed to delete registry value: %v", err)
-		}
-
-		log.Printf("Startup disabled")
-	}
-
-	return nil
-}
-
-func handleStartupMenuItemClick(menuItem *systray.MenuItem) {
-	for range menuItem.ClickedCh {
-		currentlyEnabled := isStartupEnabled()
-		newState := !currentlyEnabled
-
-		err := setStartupEnabled(newState)
-		if err != nil {
-			log.Printf("Failed to change startup state: %v", err)
-			continue
-		}
-
-		// Update menu item title
-		if newState {
-			menuItem.SetTitle("Startup: Enabled")
-		} else {
-			menuItem.SetTitle("Startup: Disabled")
-		}
-
-		log.Printf("Startup %s", map[bool]string{true: "enabled", false: "disabled"}[newState])
 	}
 }
 
