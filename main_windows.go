@@ -147,23 +147,33 @@ func onReady() {
 	// Add forward configurations to menu
 	for _, fc := range forwardConfigs {
 		if fc.SSHConfig != nil {
+			name := fmt.Sprintf("%s (%s:%s)->(%s:%s)", fc.SectionName, fc.RemoteIP, fc.RemotePort, fc.LocalIP, fc.LocalPort)
+			if fc.Direction == "local" {
+				name = fmt.Sprintf("%s (%s:%s)<-(%s:%s)", fc.SectionName, fc.LocalIP, fc.LocalPort, fc.RemoteIP, fc.RemotePort)
+			} else if fc.Direction == "socks5" {
+				name = fmt.Sprintf("%s (%s:%s)->socks5", fc.SectionName, fc.LocalIP, fc.LocalPort)
+			} else if fc.Direction == "reverse-socks5" {
+				name = fmt.Sprintf("%s (%s:%s)<-socks5", fc.SectionName, fc.RemoteIP, fc.RemotePort)
+			}
 			menuItem := systray.AddMenuItem(
-				fmt.Sprintf("%s (%s:%s)", fc.SectionName, fc.SSHConfig.Server, fc.SSHConfig.Port),
+				name,
 				fmt.Sprintf("Configuration for %s", fc.SectionName),
 			)
 			go handleMenuItemClick(menuItem, fc)
 		}
 	}
 
-	systray.AddSeparator()
+	// systray.AddSeparator()
 
 	// Add startup management menu items
+	/*
 	startupEnabled := isStartupEnabled()
 	startupMenuItem := systray.AddMenuItem("Startup: Disabled", "Toggle Startup")
 	if startupEnabled {
 		startupMenuItem.SetTitle("Startup: Enabled")
 	}
 	go handleStartupMenuItemClick(startupMenuItem)
+
 
 	systray.AddSeparator()
 	showLogMenuItem := systray.AddMenuItem("Show Log", "Show Log")
