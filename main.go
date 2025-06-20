@@ -15,6 +15,7 @@ type ServerConfig struct {
 	Server   string
 	User     string
 	Password string
+	Port     string
 }
 
 type CommonConfig struct {
@@ -56,10 +57,15 @@ func main() {
 		}
 
 		if section.HasKey("user") && section.HasKey("password") {
+			port := section.Key("port").String()
+			if port == "" {
+				port = "22" // Default SSH port
+			}
 			servers[section.Name()] = &ServerConfig{
 				Server:   section.Key("server").String(),
 				User:     section.Key("user").String(),
 				Password: section.Key("password").String(),
+				Port:     port,
 			}
 		} else if section.HasKey("server") && section.HasKey("direction") {
 			forwardConfig := &ForwardConfig{
@@ -109,7 +115,7 @@ func connectAndForward(config *ForwardConfig, commonConfig *CommonConfig) error 
 		Timeout:         10 * time.Second,
 	}
 
-	conn, err := ssh.Dial("tcp", fmt.Sprintf("%s:22", config.SSHConfig.Server), sshConfig)
+	conn, err := ssh.Dial("tcp", fmt.Sprintf("%s:%s", config.SSHConfig.Server, config.SSHConfig.Port), sshConfig)
 	if err != nil {
 		return fmt.Errorf("failed to dial: %v", err)
 	}
