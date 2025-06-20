@@ -32,13 +32,14 @@ type CommonConfig struct {
 }
 
 type ForwardConfig struct {
-	ServerName string
-	RemoteIP   string
-	RemotePort string
-	LocalIP    string
-	LocalPort  string
-	Direction  string
-	SSHConfig  *ServerConfig
+	SectionName string // Original section name from config.ini
+	ServerName  string
+	RemoteIP    string
+	RemotePort  string
+	LocalIP     string
+	LocalPort   string
+	Direction   string
+	SSHConfig   *ServerConfig
 	// SOCKS5 authentication
 	Socks5User string
 	Socks5Pass string
@@ -102,14 +103,15 @@ func main() {
 			}
 		} else if section.HasKey("server") && section.HasKey("direction") {
 			forwardConfig := &ForwardConfig{
-				ServerName: section.Key("server").String(),
-				RemoteIP:   section.Key("remoteIP").String(),
-				RemotePort: section.Key("remotePort").String(),
-				LocalIP:    section.Key("localIP").String(),
-				LocalPort:  section.Key("localPort").String(),
-				Direction:  section.Key("direction").String(),
-				Socks5User: section.Key("socks5User").String(),
-				Socks5Pass: section.Key("socks5Pass").String(),
+				SectionName: section.Name(),
+				ServerName:  section.Key("server").String(),
+				RemoteIP:    section.Key("remoteIP").String(),
+				RemotePort:  section.Key("remotePort").String(),
+				LocalIP:     section.Key("localIP").String(),
+				LocalPort:   section.Key("localPort").String(),
+				Direction:   section.Key("direction").String(),
+				Socks5User:  section.Key("socks5User").String(),
+				Socks5Pass:  section.Key("socks5Pass").String(),
 			}
 			forwardConfigs = append(forwardConfigs, forwardConfig)
 		}
@@ -146,8 +148,8 @@ func onReady() {
 	for _, fc := range forwardConfigs {
 		if fc.SSHConfig != nil {
 			menuItem := systray.AddMenuItem(
-				fmt.Sprintf("%s (%s)", fc.ServerName, fc.Direction),
-				fmt.Sprintf("Configuration for %s", fc.ServerName),
+				fmt.Sprintf("%s (%s:%s)", fc.SectionName, fc.SSHConfig.Server, fc.SSHConfig.Port),
+				fmt.Sprintf("Configuration for %s", fc.SectionName),
 			)
 			go handleMenuItemClick(menuItem, fc)
 		}
@@ -186,8 +188,8 @@ func onExit() {
 func handleMenuItemClick(menuItem *systray.MenuItem, config *ForwardConfig) {
 	for range menuItem.ClickedCh {
 		// Show status for this configuration
-		log.Printf("Configuration: %s (%s) - %s:%s -> %s:%s",
-			config.ServerName, config.Direction,
+		log.Printf("Configuration: %s (%s:%s) - %s:%s -> %s:%s",
+			config.SectionName, config.SSHConfig.Server, config.SSHConfig.Port,
 			config.LocalIP, config.LocalPort,
 			config.RemoteIP, config.RemotePort)
 	}
@@ -201,7 +203,7 @@ func handleConnection(config *ForwardConfig, commonConfig *CommonConfig) {
 		default:
 			err := connectAndForward(config, commonConfig)
 			if err != nil {
-				log.Printf("Error in connection for %s: %v. Retrying in 30 seconds...", config.ServerName, err)
+				log.Printf("Error in connection for %s: %v. Retrying in 30 seconds...", config.SectionName, err)
 				select {
 				case <-time.After(30 * time.Second):
 					continue

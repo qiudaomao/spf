@@ -26,13 +26,14 @@ type CommonConfig struct {
 }
 
 type ForwardConfig struct {
-	ServerName string
-	RemoteIP   string
-	RemotePort string
-	LocalIP    string
-	LocalPort  string
-	Direction  string
-	SSHConfig  *ServerConfig
+	SectionName string
+	ServerName  string
+	RemoteIP    string
+	RemotePort  string
+	LocalIP     string
+	LocalPort   string
+	Direction   string
+	SSHConfig   *ServerConfig
 	// SOCKS5 authentication
 	Socks5User string
 	Socks5Pass string
@@ -72,14 +73,15 @@ func main() {
 			}
 		} else if section.HasKey("server") && section.HasKey("direction") {
 			forwardConfig := &ForwardConfig{
-				ServerName: section.Key("server").String(),
-				RemoteIP:   section.Key("remoteIP").String(),
-				RemotePort: section.Key("remotePort").String(),
-				LocalIP:    section.Key("localIP").String(),
-				LocalPort:  section.Key("localPort").String(),
-				Direction:  section.Key("direction").String(),
-				Socks5User: section.Key("socks5User").String(),
-				Socks5Pass: section.Key("socks5Pass").String(),
+				SectionName: section.Name(),
+				ServerName:  section.Key("server").String(),
+				RemoteIP:    section.Key("remoteIP").String(),
+				RemotePort:  section.Key("remotePort").String(),
+				LocalIP:     section.Key("localIP").String(),
+				LocalPort:   section.Key("localPort").String(),
+				Direction:   section.Key("direction").String(),
+				Socks5User:  section.Key("socks5User").String(),
+				Socks5Pass:  section.Key("socks5Pass").String(),
 			}
 			forwardConfigs = append(forwardConfigs, forwardConfig)
 		}
@@ -90,7 +92,7 @@ func main() {
 			fc.SSHConfig = sshConfig
 			go handleConnection(fc, &commonConfig)
 		} else {
-			log.Printf("Warning: No server configuration found for %s", fc.ServerName)
+			log.Printf("Warning: No server configuration found for %s", fc.SectionName)
 		}
 	}
 
@@ -102,7 +104,7 @@ func handleConnection(config *ForwardConfig, commonConfig *CommonConfig) {
 	for {
 		err := connectAndForward(config, commonConfig)
 		if err != nil {
-			log.Printf("Error in connection for %s: %v. Retrying in 30 seconds...", config.ServerName, err)
+			log.Printf("Error in connection for %s: %v. Retrying in 30 seconds...", config.SectionName, err)
 			time.Sleep(30 * time.Second)
 		}
 	}
