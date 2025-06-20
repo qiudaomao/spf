@@ -166,10 +166,13 @@ func onReady() {
 	go handleStartupMenuItemClick(startupMenuItem)
 
 	systray.AddSeparator()
-	systray.AddMenuItem("Show Log", "Show Log")
-	systray.AddMenuItem("Reload Config", "Reload Config")
+	showLogMenuItem := systray.AddMenuItem("Show Log", "Show Log")
+	reloadConfigMenuItem := systray.AddMenuItem("Reload Config", "Reload Config")
+	go handleShowLogMenuItemClick(showLogMenuItem)
+	go handleReloadConfigMenuItemClick(reloadConfigMenuItem)
 	systray.AddSeparator()
-	systray.AddMenuItem("Quit", "Quit")
+	quitMenuItem := systray.AddMenuItem("Quit", "Quit")
+	go handleQuitMenuItemClick(quitMenuItem)
 
 	// Start all forward connections
 	for _, fc := range forwardConfigs {
@@ -885,5 +888,26 @@ func handleStartupMenuItemClick(menuItem *systray.MenuItem) {
 		}
 
 		log.Printf("Startup %s", map[bool]string{true: "enabled", false: "disabled"}[newState])
+	}
+}
+
+func handleQuitMenuItemClick(menuItem *systray.MenuItem) {
+	for range menuItem.ClickedCh {
+		log.Println("Quitting SSH Port Forwarder...")
+		systray.Quit()
+	}
+}
+
+func handleShowLogMenuItemClick(menuItem *systray.MenuItem) {
+	for range menuItem.ClickedCh {
+		// Implementation of Show Log menu item click handler
+		log.Println("Show Log menu item clicked")
+	}
+}
+
+func handleReloadConfigMenuItemClick(menuItem *systray.MenuItem) {
+	for range menuItem.ClickedCh {
+		// Implementation of Reload Config menu item click handler
+		log.Println("Reload Config menu item clicked")
 	}
 }
