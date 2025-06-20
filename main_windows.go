@@ -17,6 +17,41 @@ import (
 	"gopkg.in/ini.v1"
 )
 
+// Struct definitions
+type ServerConfig struct {
+	Server   string
+	User     string
+	Password string
+	Port     string
+}
+
+type CommonConfig struct {
+	Debug bool
+}
+
+type ForwardConfig struct {
+	ServerName string
+	RemoteIP   string
+	RemotePort string
+	LocalIP    string
+	LocalPort  string
+	Direction  string
+	SSHConfig  *ServerConfig
+	// SOCKS5 authentication
+	Socks5User string
+	Socks5Pass string
+}
+
+// SOCKS5 server types
+type socks5Server struct {
+	sshConn *ssh.Client
+	config  *ForwardConfig
+}
+
+type reverseSocks5Server struct {
+	config *ForwardConfig
+}
+
 var (
 	cfg            *ini.File
 	commonConfig   *CommonConfig
@@ -379,5 +414,403 @@ func createDefaultIcon(path string) {
 	err := os.WriteFile(path, defaultIcon, 0644)
 	if err != nil {
 		log.Printf("Failed to create default icon: %v", err)
+	}
+}
+
+// SOCKS5 server method implementations
+func (s *socks5Server) handleConnection(clientConn net.Conn, commonConfig *CommonConfig) error {
+	// Read SOCKS5 version and number of authentication methods
+	buf := make([]byte, 256)
+	n, err := clientConn.Read(buf)
+	if err != nil {
+		return fmt.Errorf("failed to read SOCKS5 greeting: %v", err)
+	}
+
+	if n < 2 || buf[0] != 0x05 {
+		return fmt.Errorf("invalid SOCKS5 version")
+	}
+
+	// Check if authentication is required
+	requireAuth := s.config.Socks5User != "" && s.config.Socks5Pass != ""
+
+	// Parse supported authentication methods
+	numMethods := int(buf[1])
+	if n < 2+numMethods {
+		return fmt.Errorf("invalid authentication methods")
+	}
+
+	supportedMethods := buf[2 : 2+numMethods]
+	var selectedMethod byte = 0xFF // No acceptable methods
+
+	if requireAuth {
+		// Check if client supports username/password authentication (method 0x02)
+		for _, method := range supportedMethods {
+			if method == 0x02 {
+				selectedMethod = 0x02
+				break
+			}
+		}
+	} else {
+		// Check if client supports no authentication (method 0x00)
+		for _, method := range supportedMethods {
+			if method == 0x00 {
+				selectedMethod = 0x00
+				break
+			}
+		}
+	}
+
+	// Send authentication method selection response
+	_, err = clientConn.Write([]byte{0x05, selectedMethod})
+	if err != nil {
+		return fmt.Errorf("failed to send auth method response: %v", err)
+	}
+
+	if selectedMethod == 0xFF {
+		return fmt.Errorf("no acceptable authentication methods")
+	}
+
+	// Handle authentication if required
+	if selectedMethod == 0x02 {
+		err = s.handleUsernamePasswordAuth(clientConn, commonConfig)
+		if err != nil {
+			return fmt.Errorf("authentication failed: %v", err)
+		}
+	}
+
+	// Read connection request
+	n, err = clientConn.Read(buf)
+	if err != nil {
+		return fmt.Errorf("failed to read connection request: %v", err)
+	}
+
+	if n < 4 || buf[0] != 0x05 || buf[1] != 0x01 {
+		return fmt.Errorf("invalid SOCKS5 connection request")
+	}
+
+	// Parse target address
+	var targetAddr string
+	var targetPort uint16
+
+	switch buf[3] { // Address type
+	case 0x01: // IPv4
+		if n < 10 {
+			return fmt.Errorf("invalid IPv4 address length")
+		}
+		targetAddr = fmt.Sprintf("%d.%d.%d.%d", buf[4], buf[5], buf[6], buf[7])
+		targetPort = uint16(buf[8])<<8 | uint16(buf[9])
+	case 0x03: // Domain name
+		if n < 5 {
+			return fmt.Errorf("invalid domain name length")
+		}
+		domainLen := int(buf[4])
+		if n < 5+domainLen+2 {
+			return fmt.Errorf("incomplete domain name")
+		}
+		targetAddr = string(buf[5 : 5+domainLen])
+		targetPort = uint16(buf[5+domainLen])<<8 | uint16(buf[5+domainLen+1])
+	case 0x04: // IPv6
+		if n < 22 {
+			return fmt.Errorf("invalid IPv6 address length")
+		}
+		// IPv6 address parsing
+		ipv6 := net.IP(buf[4:20])
+		targetAddr = ipv6.String()
+		targetPort = uint16(buf[20])<<8 | uint16(buf[21])
+	default:
+		return fmt.Errorf("unsupported address type: %d", buf[3])
+	}
+
+	target := fmt.Sprintf("%s:%d", targetAddr, targetPort)
+
+	// Connect to target through SSH tunnel
+	remoteConn, err := s.sshConn.Dial("tcp", target)
+	if err != nil {
+		// Send connection failed response
+		response := []byte{0x05, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+		clientConn.Write(response)
+		return fmt.Errorf("failed to connect to target %s: %v", target, err)
+	}
+	defer remoteConn.Close()
+
+	// Send success response
+	response := []byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	_, err = clientConn.Write(response)
+	if err != nil {
+		return fmt.Errorf("failed to send success response: %v", err)
+	}
+
+	if commonConfig.Debug {
+		log.Printf("SOCKS5 connection established to %s", target)
+	}
+
+	// Start bidirectional data transfer and wait for completion
+	done := make(chan bool, 2)
+
+	go func() {
+		copyConn(clientConn, remoteConn, commonConfig)
+		done <- true
+	}()
+
+	go func() {
+		copyConn(remoteConn, clientConn, commonConfig)
+		done <- true
+	}()
+
+	// Wait for either direction to complete
+	<-done
+
+	return nil
+}
+
+func (s *socks5Server) handleUsernamePasswordAuth(clientConn net.Conn, commonConfig *CommonConfig) error {
+	buf := make([]byte, 256)
+	n, err := clientConn.Read(buf)
+	if err != nil {
+		return fmt.Errorf("failed to read auth request: %v", err)
+	}
+
+	if n < 2 || buf[0] != 0x01 {
+		return fmt.Errorf("invalid auth version")
+	}
+
+	// Parse username
+	userLen := int(buf[1])
+	if n < 2+userLen+1 {
+		return fmt.Errorf("invalid username length")
+	}
+	username := string(buf[2 : 2+userLen])
+
+	// Parse password
+	passLen := int(buf[2+userLen])
+	if n < 2+userLen+1+passLen {
+		return fmt.Errorf("invalid password length")
+	}
+	password := string(buf[2+userLen+1 : 2+userLen+1+passLen])
+
+	// Verify credentials
+	if username == s.config.Socks5User && password == s.config.Socks5Pass {
+		// Authentication successful
+		_, err = clientConn.Write([]byte{0x01, 0x00})
+		if err != nil {
+			return fmt.Errorf("failed to send auth success: %v", err)
+		}
+		if commonConfig.Debug {
+			log.Printf("SOCKS5 authentication successful for user: %s", username)
+		}
+		return nil
+	} else {
+		// Authentication failed
+		_, err = clientConn.Write([]byte{0x01, 0x01})
+		if err != nil {
+			return fmt.Errorf("failed to send auth failure: %v", err)
+		}
+		return fmt.Errorf("invalid credentials for user: %s", username)
+	}
+}
+
+func (s *reverseSocks5Server) handleConnection(clientConn net.Conn, commonConfig *CommonConfig) error {
+	// Read SOCKS5 version and number of authentication methods
+	buf := make([]byte, 256)
+	n, err := clientConn.Read(buf)
+	if err != nil {
+		return fmt.Errorf("failed to read SOCKS5 greeting: %v", err)
+	}
+
+	if n < 2 || buf[0] != 0x05 {
+		return fmt.Errorf("invalid SOCKS5 version")
+	}
+
+	// Check if authentication is required
+	requireAuth := s.config.Socks5User != "" && s.config.Socks5Pass != ""
+
+	// Parse supported authentication methods
+	numMethods := int(buf[1])
+	if n < 2+numMethods {
+		return fmt.Errorf("invalid authentication methods")
+	}
+
+	supportedMethods := buf[2 : 2+numMethods]
+	var selectedMethod byte = 0xFF // No acceptable methods
+
+	if requireAuth {
+		// Check if client supports username/password authentication (method 0x02)
+		for _, method := range supportedMethods {
+			if method == 0x02 {
+				selectedMethod = 0x02
+				break
+			}
+		}
+	} else {
+		// Check if client supports no authentication (method 0x00)
+		for _, method := range supportedMethods {
+			if method == 0x00 {
+				selectedMethod = 0x00
+				break
+			}
+		}
+	}
+
+	// Send authentication method selection response
+	_, err = clientConn.Write([]byte{0x05, selectedMethod})
+	if err != nil {
+		return fmt.Errorf("failed to send auth method response: %v", err)
+	}
+
+	if selectedMethod == 0xFF {
+		return fmt.Errorf("no acceptable authentication methods")
+	}
+
+	// Handle authentication if required
+	if selectedMethod == 0x02 {
+		err = s.handleUsernamePasswordAuth(clientConn, commonConfig)
+		if err != nil {
+			return fmt.Errorf("authentication failed: %v", err)
+		}
+	}
+
+	// Read connection request
+	n, err = clientConn.Read(buf)
+	if err != nil {
+		return fmt.Errorf("failed to read connection request: %v", err)
+	}
+
+	if n < 4 || buf[0] != 0x05 || buf[1] != 0x01 {
+		return fmt.Errorf("invalid SOCKS5 connection request")
+	}
+
+	// Parse target address
+	var targetAddr string
+	var targetPort uint16
+
+	switch buf[3] { // Address type
+	case 0x01: // IPv4
+		if n < 10 {
+			return fmt.Errorf("invalid IPv4 address length")
+		}
+		targetAddr = fmt.Sprintf("%d.%d.%d.%d", buf[4], buf[5], buf[6], buf[7])
+		targetPort = uint16(buf[8])<<8 | uint16(buf[9])
+	case 0x03: // Domain name
+		if n < 5 {
+			return fmt.Errorf("invalid domain name length")
+		}
+		domainLen := int(buf[4])
+		if n < 5+domainLen+2 {
+			return fmt.Errorf("incomplete domain name")
+		}
+		targetAddr = string(buf[5 : 5+domainLen])
+		targetPort = uint16(buf[5+domainLen])<<8 | uint16(buf[5+domainLen+1])
+	case 0x04: // IPv6
+		if n < 22 {
+			return fmt.Errorf("invalid IPv6 address length")
+		}
+		// IPv6 address parsing
+		ipv6 := net.IP(buf[4:20])
+		targetAddr = ipv6.String()
+		targetPort = uint16(buf[20])<<8 | uint16(buf[21])
+	default:
+		return fmt.Errorf("unsupported address type: %d", buf[3])
+	}
+
+	target := fmt.Sprintf("%s:%d", targetAddr, targetPort)
+
+	// Add DNS resolution debugging for domain names
+	if buf[3] == 0x03 { // Domain name
+		_, err := net.LookupIP(targetAddr)
+		if err != nil {
+			log.Printf("Reverse SOCKS5 DNS resolution failed for %s: %v", targetAddr, err)
+		}
+	}
+
+	// For reverse SOCKS5, we need to connect through the local machine's internet connection
+	// This allows the remote server to access the internet through our local connection
+	dialer := &net.Dialer{
+		Timeout: 30 * time.Second,
+	}
+	localConn, err := dialer.Dial("tcp", target)
+	if err != nil {
+		if commonConfig.Debug {
+			log.Printf("Reverse SOCKS5 connection failed to %s: %v", target, err)
+		}
+		// Send connection failed response
+		response := []byte{0x05, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+		clientConn.Write(response)
+		return fmt.Errorf("failed to connect to target %s through local connection: %v", target, err)
+	}
+	defer localConn.Close()
+
+	// Send success response
+	response := []byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	_, err = clientConn.Write(response)
+	if err != nil {
+		return fmt.Errorf("failed to send success response: %v", err)
+	}
+
+	if commonConfig.Debug {
+		log.Printf("Reverse SOCKS5 connection established: %s", target)
+	}
+
+	// Start bidirectional data transfer and wait for completion
+	done := make(chan bool, 2)
+
+	go func() {
+		copyConn(clientConn, localConn, commonConfig)
+		done <- true
+	}()
+
+	go func() {
+		copyConn(localConn, clientConn, commonConfig)
+		done <- true
+	}()
+
+	// Wait for either direction to complete
+	<-done
+
+	return nil
+}
+
+func (s *reverseSocks5Server) handleUsernamePasswordAuth(clientConn net.Conn, commonConfig *CommonConfig) error {
+	buf := make([]byte, 256)
+	n, err := clientConn.Read(buf)
+	if err != nil {
+		return fmt.Errorf("failed to read auth request: %v", err)
+	}
+
+	if n < 2 || buf[0] != 0x01 {
+		return fmt.Errorf("invalid auth version")
+	}
+
+	// Parse username
+	userLen := int(buf[1])
+	if n < 2+userLen+1 {
+		return fmt.Errorf("invalid username length")
+	}
+	username := string(buf[2 : 2+userLen])
+
+	// Parse password
+	passLen := int(buf[2+userLen])
+	if n < 2+userLen+1+passLen {
+		return fmt.Errorf("invalid password length")
+	}
+	password := string(buf[2+userLen+1 : 2+userLen+1+passLen])
+
+	// Verify credentials
+	if username == s.config.Socks5User && password == s.config.Socks5Pass {
+		// Authentication successful
+		_, err = clientConn.Write([]byte{0x01, 0x00})
+		if err != nil {
+			return fmt.Errorf("failed to send auth success: %v", err)
+		}
+		if commonConfig.Debug {
+			log.Printf("Reverse SOCKS5 authentication successful for user: %s", username)
+		}
+		return nil
+	} else {
+		// Authentication failed
+		_, err = clientConn.Write([]byte{0x01, 0x01})
+		if err != nil {
+			return fmt.Errorf("failed to send auth failure: %v", err)
+		}
+		return fmt.Errorf("invalid credentials for user: %s", username)
 	}
 }
