@@ -10,10 +10,12 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/getlantern/systray"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/sys/windows/registry"
 	"gopkg.in/ini.v1"
 )
 
@@ -130,8 +132,7 @@ func onReady() {
 	// Set icon
 	iconPath := "icon.ico"
 	if _, err := os.Stat(iconPath); os.IsNotExist(err) {
-		// Create a default icon if icon.png doesn't exist
-		createDefaultIcon(iconPath)
+		log.Fatalf("Icon file not found: %s. Please provide an icon.ico file.", iconPath)
 	}
 	systray.SetIcon(getIcon(iconPath))
 	systray.SetTitle("SSH Port Forwarder")
@@ -151,6 +152,16 @@ func onReady() {
 			go handleMenuItemClick(menuItem, fc)
 		}
 	}
+
+	systray.AddSeparator()
+
+	// Add startup management menu items
+	startupEnabled := isStartupEnabled()
+	startupMenuItem := systray.AddMenuItem("Startup: Disabled", "Toggle Startup")
+	if startupEnabled {
+		startupMenuItem.SetTitle("Startup: Enabled")
+	}
+	go handleStartupMenuItemClick(startupMenuItem)
 
 	systray.AddSeparator()
 	systray.AddMenuItem("Show Log", "Show Log")
@@ -397,24 +408,6 @@ func getIcon(path string) []byte {
 		return nil
 	}
 	return data
-}
-
-func createDefaultIcon(path string) {
-	// Create a simple default icon if icon.png doesn't exist
-	// This is a minimal 16x16 PNG icon data
-	defaultIcon := []byte{
-		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
-		0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x10,
-		0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0xf3, 0xff, 0x61, 0x00, 0x00, 0x00,
-		0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x60, 0x18, 0x05, 0x03,
-		0x00, 0x00, 0x30, 0x00, 0x00, 0x01, 0x57, 0x6d, 0xb7, 0x4a, 0x00, 0x00,
-		0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
-	}
-
-	err := os.WriteFile(path, defaultIcon, 0644)
-	if err != nil {
-		log.Printf("Failed to create default icon: %v", err)
-	}
 }
 
 // SOCKS5 server method implementations
@@ -812,5 +805,83 @@ func (s *reverseSocks5Server) handleUsernamePasswordAuth(clientConn net.Conn, co
 			return fmt.Errorf("failed to send auth failure: %v", err)
 		}
 		return fmt.Errorf("invalid credentials for user: %s", username)
+	}
+}
+
+// Startup management functions
+func isStartupEnabled() bool {
+	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.QUERY_VALUE)
+	if err != nil {
+		log.Printf("Failed to open registry key: %v", err)
+		return false
+	}
+	defer key.Close()
+
+	appName := "SSH Port Forwarder"
+	_, _, err = key.GetStringValue(appName)
+	return err == nil
+}
+
+func setStartupEnabled(enabled bool) error {
+	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE)
+	if err != nil {
+		return fmt.Errorf("failed to open registry key: %v", err)
+	}
+	defer key.Close()
+
+	appName := "SSH Port Forwarder"
+
+	if enabled {
+		// Get the current executable path
+		exePath, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("failed to get executable path: %v", err)
+		}
+
+		// Convert to absolute path
+		absPath, err := filepath.Abs(exePath)
+		if err != nil {
+			return fmt.Errorf("failed to get absolute path: %v", err)
+		}
+
+		// Set the registry value
+		err = key.SetStringValue(appName, absPath)
+		if err != nil {
+			return fmt.Errorf("failed to set registry value: %v", err)
+		}
+
+		log.Printf("Startup enabled: %s", absPath)
+	} else {
+		// Remove the registry value
+		err = key.DeleteValue(appName)
+		if err != nil {
+			return fmt.Errorf("failed to delete registry value: %v", err)
+		}
+
+		log.Printf("Startup disabled")
+	}
+
+	return nil
+}
+
+func handleStartupMenuItemClick(menuItem *systray.MenuItem) {
+	for range menuItem.ClickedCh {
+		currentlyEnabled := isStartupEnabled()
+		newState := !currentlyEnabled
+
+		err := setStartupEnabled(newState)
+		if err != nil {
+			log.Printf("Failed to change startup state: %v", err)
+			continue
+		}
+
+		// Update menu item title
+		if newState {
+			menuItem.SetTitle("Startup: Enabled")
+		} else {
+			menuItem.SetTitle("Startup: Disabled")
+		}
+
+		log.Printf("Startup %s", map[bool]string{true: "enabled", false: "disabled"}[newState])
 	}
 }

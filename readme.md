@@ -10,7 +10,9 @@ For Windows users, SPF can run as a system tray application instead of a termina
 
 1. **Prerequisites**: Install Go and ensure you have a C compiler (like MinGW or Visual Studio Build Tools)
 
-2. **Build the Windows version**:
+2. **Icon**: Place an `icon.ico` file in the same directory as `spf.exe` for the system tray icon
+
+3. **Build the Windows version**:
    ```cmd
    build_windows.bat
    ```
@@ -22,7 +24,10 @@ For Windows users, SPF can run as a system tray application instead of a termina
    go build -ldflags="-s -w -H windowsgui" -o spf.exe .
    ```
 
-3. **Icon**: Place an `icon.png` file in the same directory as `spf.exe` for the system tray icon
+4. **Setting Executable Icon**: To embed the icon into the .exe file itself:
+   - **Using MinGW**: Run `build_windows.bat` (uses windres)
+   - **Using Visual Studio**: Run `build_windows_vs.bat` (uses rc.exe)
+   - The icon will appear in File Explorer, taskbar, and other Windows UI elements
 
 ### Running on Windows
 
@@ -40,6 +45,10 @@ For Windows users, SPF can run as a system tray application instead of a termina
 - **System tray integration**: Easy access to status and controls
 - **Automatic restart**: Connections automatically reconnect if lost
 - **Configuration reload**: Update config.ini without restarting
+- **Startup management**: Enable/disable automatic startup with Windows boot
+  - Right-click the system tray icon and select "Startup: Enabled/Disabled"
+  - Uses Windows Registry to manage startup entries
+  - Automatically uses the current executable path
 
 ## Supported Directions
 
