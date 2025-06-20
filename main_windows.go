@@ -128,7 +128,7 @@ func main() {
 
 func onReady() {
 	// Set icon
-	iconPath := "icon.png"
+	iconPath := "icon.ico"
 	if _, err := os.Stat(iconPath); os.IsNotExist(err) {
 		// Create a default icon if icon.png doesn't exist
 		createDefaultIcon(iconPath)
