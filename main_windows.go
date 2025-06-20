@@ -161,11 +161,13 @@ func onReady() {
 		}
 	}
 
-	systray.AddSeparator()
-	showLogMenuItem := systray.AddMenuItem("Show Log", "Show Log")
-	reloadConfigMenuItem := systray.AddMenuItem("Reload Config", "Reload Config")
-	go handleShowLogMenuItemClick(showLogMenuItem)
-	go handleReloadConfigMenuItemClick(reloadConfigMenuItem)
+	/*
+		systray.AddSeparator()
+		showLogMenuItem := systray.AddMenuItem("Show Log", "Show Log")
+		reloadConfigMenuItem := systray.AddMenuItem("Reload Config", "Reload Config")
+		go handleShowLogMenuItemClick(showLogMenuItem)
+		go handleReloadConfigMenuItemClick(reloadConfigMenuItem)
+	*/
 	systray.AddSeparator()
 	quitMenuItem := systray.AddMenuItem("Quit", "Quit")
 	go handleQuitMenuItemClick(quitMenuItem)
