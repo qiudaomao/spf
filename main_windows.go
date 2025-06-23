@@ -170,7 +170,7 @@ func onReady() {
 	// Create menu structure grouped by server
 	for serverName, configs := range serverGroups {
 		// Add server section header with connection status
-		serverMenuItem := systray.AddMenuItem(fmt.Sprintf("%s", serverName), fmt.Sprintf("Server: %s (%s)", serverName, getStatusText(connStatus)))
+		serverMenuItem := systray.AddMenuItem(fmt.Sprintf("%s", serverName), fmt.Sprintf("Server: %s", serverName))
 		serverMenuItem.Disable() // Make it non-clickable
 
 		// Add port configurations under this server
