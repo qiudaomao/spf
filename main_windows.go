@@ -171,13 +171,13 @@ func onReady() {
 	for serverName, configs := range serverGroups {
 		// Check connection status for this server
 		connStatus := getConnectionStatus(serverName)
-		statusIcon := "🔴" // Disconnected
+		statusIcon := "[x]" // Disconnected
 		if connStatus {
-			statusIcon = "🟢" // Connected
+			statusIcon = "[o]" // Connected
 		}
 
 		// Add server section header with connection status
-		serverMenuItem := systray.AddMenuItem(fmt.Sprintf("%s 📡 %s", statusIcon, serverName), fmt.Sprintf("Server: %s (%s)", serverName, getStatusText(connStatus)))
+		serverMenuItem := systray.AddMenuItem(fmt.Sprintf("%s %s", statusIcon, serverName), fmt.Sprintf("Server: %s (%s)", serverName, getStatusText(connStatus)))
 		serverMenuItem.Disable() // Make it non-clickable
 
 		// Add port configurations under this server
@@ -187,19 +187,19 @@ func onReady() {
 
 			switch fc.Direction {
 			case "remote":
-				name = fmt.Sprintf("  🔄 %s:%s → %s:%s", fc.RemoteIP, fc.RemotePort, fc.LocalIP, fc.LocalPort)
+				name = fmt.Sprintf("   %s:%s → %s:%s", fc.RemoteIP, fc.RemotePort, fc.LocalIP, fc.LocalPort)
 				tooltip = fmt.Sprintf("Remote port forward: %s:%s → %s:%s", fc.RemoteIP, fc.RemotePort, fc.LocalIP, fc.LocalPort)
 			case "local":
-				name = fmt.Sprintf("  🔄 %s:%s ← %s:%s", fc.LocalIP, fc.LocalPort, fc.RemoteIP, fc.RemotePort)
+				name = fmt.Sprintf("   %s:%s ← %s:%s", fc.LocalIP, fc.LocalPort, fc.RemoteIP, fc.RemotePort)
 				tooltip = fmt.Sprintf("Local port forward: %s:%s ← %s:%s", fc.LocalIP, fc.LocalPort, fc.RemoteIP, fc.RemotePort)
 			case "socks5":
-				name = fmt.Sprintf("  🧦 %s:%s → SOCKS5", fc.LocalIP, fc.LocalPort)
+				name = fmt.Sprintf("   %s:%s → SOCKS5", fc.LocalIP, fc.LocalPort)
 				tooltip = fmt.Sprintf("SOCKS5 proxy: %s:%s", fc.LocalIP, fc.LocalPort)
 			case "reverse-socks5":
-				name = fmt.Sprintf("  🧦 %s:%s ← SOCKS5", fc.RemoteIP, fc.RemotePort)
+				name = fmt.Sprintf("   %s:%s ← SOCKS5", fc.RemoteIP, fc.RemotePort)
 				tooltip = fmt.Sprintf("Reverse SOCKS5 proxy: %s:%s", fc.RemoteIP, fc.RemotePort)
 			default:
-				name = fmt.Sprintf("  ❓ %s (Unknown)", fc.SectionName)
+				name = fmt.Sprintf("   %s (Unknown)", fc.SectionName)
 				tooltip = fmt.Sprintf("Unknown direction: %s", fc.Direction)
 			}
 
