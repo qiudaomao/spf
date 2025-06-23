@@ -159,23 +159,56 @@ func onReady() {
 	systray.AddMenuItem("Status: Running", "Status")
 	systray.AddSeparator()
 
-	// Add forward configurations to menu
+	// Group forward configurations by server
+	serverGroups := make(map[string][]*ForwardConfig)
 	for _, fc := range forwardConfigs {
 		if fc.SSHConfig != nil {
-			name := fmt.Sprintf("%s (%s:%s)->(%s:%s)", fc.SectionName, fc.RemoteIP, fc.RemotePort, fc.LocalIP, fc.LocalPort)
-			if fc.Direction == "local" {
-				name = fmt.Sprintf("%s (%s:%s)<-(%s:%s)", fc.SectionName, fc.LocalIP, fc.LocalPort, fc.RemoteIP, fc.RemotePort)
-			} else if fc.Direction == "socks5" {
-				name = fmt.Sprintf("%s (%s:%s)->socks5", fc.SectionName, fc.LocalIP, fc.LocalPort)
-			} else if fc.Direction == "reverse-socks5" {
-				name = fmt.Sprintf("%s (%s:%s)<-socks5", fc.SectionName, fc.RemoteIP, fc.RemotePort)
+			serverGroups[fc.ServerName] = append(serverGroups[fc.ServerName], fc)
+		}
+	}
+
+	// Create menu structure grouped by server
+	for serverName, configs := range serverGroups {
+		// Check connection status for this server
+		connStatus := getConnectionStatus(serverName)
+		statusIcon := "🔴" // Disconnected
+		if connStatus {
+			statusIcon = "🟢" // Connected
+		}
+
+		// Add server section header with connection status
+		serverMenuItem := systray.AddMenuItem(fmt.Sprintf("%s 📡 %s", statusIcon, serverName), fmt.Sprintf("Server: %s (%s)", serverName, getStatusText(connStatus)))
+		serverMenuItem.Disable() // Make it non-clickable
+
+		// Add port configurations under this server
+		for _, fc := range configs {
+			var name string
+			var tooltip string
+
+			switch fc.Direction {
+			case "remote":
+				name = fmt.Sprintf("  🔄 %s:%s → %s:%s", fc.RemoteIP, fc.RemotePort, fc.LocalIP, fc.LocalPort)
+				tooltip = fmt.Sprintf("Remote port forward: %s:%s → %s:%s", fc.RemoteIP, fc.RemotePort, fc.LocalIP, fc.LocalPort)
+			case "local":
+				name = fmt.Sprintf("  🔄 %s:%s ← %s:%s", fc.LocalIP, fc.LocalPort, fc.RemoteIP, fc.RemotePort)
+				tooltip = fmt.Sprintf("Local port forward: %s:%s ← %s:%s", fc.LocalIP, fc.LocalPort, fc.RemoteIP, fc.RemotePort)
+			case "socks5":
+				name = fmt.Sprintf("  🧦 %s:%s → SOCKS5", fc.LocalIP, fc.LocalPort)
+				tooltip = fmt.Sprintf("SOCKS5 proxy: %s:%s", fc.LocalIP, fc.LocalPort)
+			case "reverse-socks5":
+				name = fmt.Sprintf("  🧦 %s:%s ← SOCKS5", fc.RemoteIP, fc.RemotePort)
+				tooltip = fmt.Sprintf("Reverse SOCKS5 proxy: %s:%s", fc.RemoteIP, fc.RemotePort)
+			default:
+				name = fmt.Sprintf("  ❓ %s (Unknown)", fc.SectionName)
+				tooltip = fmt.Sprintf("Unknown direction: %s", fc.Direction)
 			}
-			menuItem := systray.AddMenuItem(
-				name,
-				fmt.Sprintf("Configuration for %s", fc.SectionName),
-			)
+
+			menuItem := systray.AddMenuItem(name, tooltip)
 			go handleMenuItemClick(menuItem, fc)
 		}
+
+		// Add separator between servers
+		systray.AddSeparator()
 	}
 
 	/*
@@ -185,7 +218,6 @@ func onReady() {
 		go handleShowLogMenuItemClick(showLogMenuItem)
 		go handleReloadConfigMenuItemClick(reloadConfigMenuItem)
 	*/
-	systray.AddSeparator()
 	quitMenuItem := systray.AddMenuItem("Quit", "Quit")
 	go handleQuitMenuItemClick(quitMenuItem)
 
@@ -211,11 +243,31 @@ func onExit() {
 
 func handleMenuItemClick(menuItem *systray.MenuItem, config *ForwardConfig) {
 	for range menuItem.ClickedCh {
-		// Show status for this configuration
-		log.Printf("Configuration: %s (%s:%s) - %s:%s -> %s:%s",
-			config.SectionName, config.SSHConfig.Server, config.SSHConfig.Port,
-			config.LocalIP, config.LocalPort,
-			config.RemoteIP, config.RemotePort)
+		// Show detailed status for this configuration
+		log.Printf("=== Configuration Details ===")
+		log.Printf("Section: %s", config.SectionName)
+		log.Printf("Server: %s (%s:%s)", config.ServerName, config.SSHConfig.Server, config.SSHConfig.Port)
+		log.Printf("Direction: %s", config.Direction)
+
+		switch config.Direction {
+		case "remote":
+			log.Printf("Remote Port Forward: %s:%s → %s:%s",
+				config.RemoteIP, config.RemotePort, config.LocalIP, config.LocalPort)
+		case "local":
+			log.Printf("Local Port Forward: %s:%s ← %s:%s",
+				config.LocalIP, config.LocalPort, config.RemoteIP, config.RemotePort)
+		case "socks5":
+			log.Printf("SOCKS5 Proxy: %s:%s", config.LocalIP, config.LocalPort)
+			if config.Socks5User != "" {
+				log.Printf("SOCKS5 Auth: %s", config.Socks5User)
+			}
+		case "reverse-socks5":
+			log.Printf("Reverse SOCKS5 Proxy: %s:%s", config.RemoteIP, config.RemotePort)
+			if config.Socks5User != "" {
+				log.Printf("SOCKS5 Auth: %s", config.Socks5User)
+			}
+		}
+		log.Printf("================================")
 	}
 }
 
@@ -957,4 +1009,31 @@ func (cm *ConnectionManager) RemoveConnection(serverName string) {
 		log.Printf("Removed failed SSH connection for server: %s", serverName)
 	}
 	delete(cm.connections, serverName)
+}
+
+// Helper functions for connection status
+func getConnectionStatus(serverName string) bool {
+	if connManager == nil {
+		return false
+	}
+
+	connManager.mutex.RLock()
+	defer connManager.mutex.RUnlock()
+
+	if conn, exists := connManager.connections[serverName]; exists && conn != nil {
+		// Check if connection is still alive
+		if conn.Conn != nil {
+			// Try to send a keep-alive ping
+			_, _, err := conn.SendRequest("keepalive@openssh.com", true, nil)
+			return err == nil
+		}
+	}
+	return false
+}
+
+func getStatusText(connected bool) string {
+	if connected {
+		return "Connected"
+	}
+	return "Disconnected"
 }
