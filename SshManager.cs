@@ -340,6 +340,17 @@ namespace spf
             
             lock (_lock)
             {
+                // Properly dispose of the disconnected SSH client
+                if (_sshClients.ContainsKey(serverName))
+                {
+                    try
+                    {
+                        _sshClients[serverName].Dispose();
+                    }
+                    catch { }
+                    _sshClients.Remove(serverName);
+                }
+
                 // Remove existing port forwards
                 if (_portForwards.ContainsKey(serverName))
                 {
@@ -435,12 +446,15 @@ namespace spf
 
         public void Dispose()
         {
+            // Cancel the timer immediately to prevent further checks
+            _connectionCheckTimer?.Change(Timeout.Infinite, Timeout.Infinite);
             _connectionCheckTimer?.Dispose();
             
+            // Use parallel disposal for faster cleanup
             lock (_lock)
             {
-                // Stop all SOCKS5 servers
-                foreach (var kvp in _socks5Servers)
+                // Stop all SOCKS5 servers in parallel
+                var socks5Tasks = _socks5Servers.Select(kvp => Task.Run(() =>
                 {
                     try
                     {
@@ -448,32 +462,35 @@ namespace spf
                         kvp.Value.Dispose();
                     }
                     catch { }
-                }
-                _socks5Servers.Clear();
+                })).ToArray();
 
-                // Stop all port forwards
-                foreach (var kvp in _portForwards)
+                // Stop all port forwards in parallel
+                var forwardTasks = _portForwards.SelectMany(kvp => kvp.Value.Select(forward => Task.Run(() =>
                 {
-                    foreach (var forward in kvp.Value)
+                    try
                     {
-                        try
-                        {
-                            forward.Stop();
-                        }
-                        catch { }
+                        forward.Stop();
                     }
-                }
-                _portForwards.Clear();
+                    catch { }
+                }))).ToArray();
 
-                // Close all SSH clients
-                foreach (var kvp in _sshClients)
+                // Close all SSH clients in parallel
+                var clientTasks = _sshClients.Select(kvp => Task.Run(() =>
                 {
                     try
                     {
                         kvp.Value.Dispose();
                     }
                     catch { }
-                }
+                })).ToArray();
+
+                // Wait for all tasks with a timeout
+                Task.WaitAll(socks5Tasks.Concat(forwardTasks).Concat(clientTasks).ToArray(), TimeSpan.FromSeconds(5));
+
+                // Clear collections
+                _socks5Servers.Clear();
+                _portForwards.Clear();
+                _portForwardConfigs.Clear();
                 _sshClients.Clear();
             }
         }

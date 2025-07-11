@@ -235,11 +235,40 @@ namespace spf
         private void Exit()
         {
             _logger.LogInfo("Application exiting...");
-            _sshManager.Dispose();
+            
+            // Hide tray icon immediately for better user experience
             _trayIcon.Visible = false;
-            _trayIcon.Dispose();
-            _customIcon?.Dispose();
-            Application.Exit();
+            
+            // Dispose resources asynchronously to avoid blocking UI
+            Task.Run(() =>
+            {
+                try
+                {
+                    _sshManager.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"Error disposing SSH manager: {ex.Message}");
+                }
+            }).ContinueWith(_ =>
+            {
+                // Ensure UI disposal happens on UI thread
+                if (_trayIcon.ContextMenuStrip?.InvokeRequired == true)
+                {
+                    _trayIcon.ContextMenuStrip.Invoke(new Action(() =>
+                    {
+                        _trayIcon.Dispose();
+                        _customIcon?.Dispose();
+                        Application.Exit();
+                    }));
+                }
+                else
+                {
+                    _trayIcon.Dispose();
+                    _customIcon?.Dispose();
+                    Application.Exit();
+                }
+            });
         }
     }
 }
