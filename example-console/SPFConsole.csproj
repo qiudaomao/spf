@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../csharp/SPF.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="../libspf.*" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../spf.dll" CopyToOutputDirectory="PreserveNewest" Condition="'$(OS)' == 'Windows_NT'" />
+    <Content Include="../libspf.dylib" CopyToOutputDirectory="PreserveNewest" Condition="'$([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform($([System.Runtime.InteropServices.OSPlatform]::OSX)))' == 'true'" />
+    <Content Include="../libspf.so" CopyToOutputDirectory="PreserveNewest" Condition="'$([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform($([System.Runtime.InteropServices.OSPlatform]::Linux)))' == 'true'" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../example/ProgramConsole.cs" />
+  </ItemGroup>
+
+</Project>
