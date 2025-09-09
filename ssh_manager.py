@@ -4,22 +4,156 @@ import time
 import socket
 import select
 import logging
-from typing import Optional, Callable, Dict, Any
+from typing import Optional, Callable, Dict, Any, Tuple
 from PyQt5.QtCore import QObject, pyqtSignal, QTimer, QThread
 from database import Server, PortForward
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+class SharedSSHConnection(QObject):
+    """Manages a shared SSH connection for multiple tunnels"""
+    connection_lost = pyqtSignal()
+    
+    def __init__(self, server: Server):
+        super().__init__()
+        self.server = server
+        self.ssh_client = None
+        self.ref_count = 0
+        self.is_connected = False
+        self.connection_lock = threading.RLock()
+        
+    def get_server_key(self) -> str:
+        """Generate a unique key for the server configuration"""
+        return f"{self.server.host}:{self.server.port}:{self.server.username}"
+    
+    def connect(self):
+        """Establish SSH connection if not already connected"""
+        with self.connection_lock:
+            if self.is_connected and self.ssh_client and self.ssh_client.get_transport() and self.ssh_client.get_transport().is_active():
+                return True
+                
+            try:
+                if self.ssh_client:
+                    try:
+                        self.ssh_client.close()
+                    except:
+                        pass
+                        
+                self.ssh_client = paramiko.SSHClient()
+                self.ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                
+                # Prepare connection parameters
+                connect_kwargs = {
+                    'hostname': self.server.host,
+                    'port': self.server.port,
+                    'username': self.server.username,
+                    'timeout': 10
+                }
+                
+                # Use password or private key
+                if self.server.private_key_path:
+                    try:
+                        # Try different key types in order of preference
+                        key_path = self.server.private_key_path
+                        private_key = None
+                        
+                        # Try RSA key first
+                        try:
+                            private_key = paramiko.RSAKey.from_private_key_file(key_path)
+                            logger.debug(f"Loaded RSA private key from {key_path}")
+                        except Exception:
+                            # Try Ed25519
+                            try:
+                                private_key = paramiko.Ed25519Key.from_private_key_file(key_path)
+                                logger.debug(f"Loaded Ed25519 private key from {key_path}")
+                            except Exception:
+                                # Try ECDSA
+                                try:
+                                    private_key = paramiko.ECDSAKey.from_private_key_file(key_path)
+                                    logger.debug(f"Loaded ECDSA private key from {key_path}")
+                                except Exception:
+                                    # Try DSS
+                                    try:
+                                        private_key = paramiko.DSSKey.from_private_key_file(key_path)
+                                        logger.debug(f"Loaded DSS private key from {key_path}")
+                                    except Exception as e:
+                                        logger.error(f"Failed to load private key from {key_path}: {e}")
+                                        if self.server.password:
+                                            logger.info("Falling back to password authentication")
+                                            connect_kwargs['password'] = self.server.password
+                                        else:
+                                            raise Exception(f"Unable to load private key and no password provided: {e}")
+                        
+                        if private_key:
+                            connect_kwargs['pkey'] = private_key
+                            
+                    except Exception as e:
+                        if self.server.password:
+                            logger.info("Private key failed, using password authentication")
+                            connect_kwargs['password'] = self.server.password
+                        else:
+                            raise Exception(f"Authentication failed: {e}")
+                elif self.server.password:
+                    connect_kwargs['password'] = self.server.password
+                else:
+                    raise Exception("No authentication method provided (password or private key required)")
+                
+                # Connect to SSH server
+                self.ssh_client.connect(**connect_kwargs)
+                self.is_connected = True
+                logger.info(f"SSH connection established to {self.server.host}:{self.server.port}")
+                return True
+                
+            except Exception as e:
+                logger.error(f"SSH connection failed: {e}")
+                self.is_connected = False
+                if self.ssh_client:
+                    try:
+                        self.ssh_client.close()
+                    except:
+                        pass
+                    self.ssh_client = None
+                raise e
+    
+    def add_ref(self):
+        """Add a reference to this connection"""
+        with self.connection_lock:
+            self.ref_count += 1
+    
+    def remove_ref(self):
+        """Remove a reference to this connection"""
+        with self.connection_lock:
+            self.ref_count -= 1
+            return self.ref_count
+    
+    def close(self):
+        """Close the SSH connection"""
+        with self.connection_lock:
+            if self.ssh_client:
+                try:
+                    self.ssh_client.close()
+                except:
+                    pass
+                self.ssh_client = None
+            self.is_connected = False
+    
+    def is_active(self):
+        """Check if connection is active"""
+        with self.connection_lock:
+            return (self.is_connected and 
+                   self.ssh_client and 
+                   self.ssh_client.get_transport() and 
+                   self.ssh_client.get_transport().is_active())
+
 class SSHTunnel(QObject):
     status_changed = pyqtSignal(str)  # 'connected', 'disconnected', 'error', 'connecting'
     error_occurred = pyqtSignal(str)
     
-    def __init__(self, server: Server, port_forward: PortForward):
+    def __init__(self, shared_connection: SharedSSHConnection, port_forward: PortForward):
         super().__init__()
-        self.server = server
+        self.shared_connection = shared_connection
         self.port_forward = port_forward
-        self.ssh_client = None
         self.tunnel_thread = None
         self.is_running = False
         self.should_stop = False
@@ -33,6 +167,9 @@ class SSHTunnel(QObject):
         self.retry_timer = QTimer()
         self.retry_timer.timeout.connect(self.retry_connection)
         self.retry_timer.setSingleShot(True)
+        
+        # Add reference to shared connection
+        self.shared_connection.add_ref()
         
     def start(self):
         """Start the SSH tunnel"""
@@ -57,28 +194,23 @@ class SSHTunnel(QObject):
             self.server_socket = None
         
         # Clean up remote forwarding if active
-        if self.remote_forward_request and self.ssh_client:
+        if self.remote_forward_request and self.shared_connection.ssh_client:
             try:
-                transport = self.ssh_client.get_transport()
+                transport = self.shared_connection.ssh_client.get_transport()
                 if transport:
                     transport.cancel_port_forward(self.port_forward.local_host, self.port_forward.local_port)
             except Exception as e:
                 logger.debug(f"Error canceling remote port forward: {e}")
             self.remote_forward_request = None
         
-        # Close SSH client
-        if self.ssh_client:
-            try:
-                self.ssh_client.close()
-            except Exception as e:
-                logger.debug(f"Error closing SSH client: {e}")
-            self.ssh_client = None
-        
         # Wait for tunnel thread to finish
         if self.tunnel_thread and self.tunnel_thread.is_alive():
             self.tunnel_thread.join(timeout=3)
             if self.tunnel_thread.is_alive():
                 logger.warning("Tunnel thread did not stop gracefully")
+        
+        # Remove reference to shared connection
+        remaining_refs = self.shared_connection.remove_ref()
         
         self.is_running = False
         self.status_changed.emit('disconnected')
@@ -91,67 +223,8 @@ class SSHTunnel(QObject):
         self.status_changed.emit('connecting')
         
         try:
-            self.ssh_client = paramiko.SSHClient()
-            self.ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            
-            # Prepare connection parameters
-            connect_kwargs = {
-                'hostname': self.server.host,
-                'port': self.server.port,
-                'username': self.server.username,
-                'timeout': 10
-            }
-            
-            # Use password or private key
-            if self.server.private_key_path:
-                try:
-                    # Try different key types in order of preference
-                    key_path = self.server.private_key_path
-                    private_key = None
-                    
-                    # Try RSA key first
-                    try:
-                        private_key = paramiko.RSAKey.from_private_key_file(key_path)
-                        logger.debug(f"Loaded RSA private key from {key_path}")
-                    except Exception:
-                        # Try Ed25519
-                        try:
-                            private_key = paramiko.Ed25519Key.from_private_key_file(key_path)
-                            logger.debug(f"Loaded Ed25519 private key from {key_path}")
-                        except Exception:
-                            # Try ECDSA
-                            try:
-                                private_key = paramiko.ECDSAKey.from_private_key_file(key_path)
-                                logger.debug(f"Loaded ECDSA private key from {key_path}")
-                            except Exception:
-                                # Try DSS
-                                try:
-                                    private_key = paramiko.DSSKey.from_private_key_file(key_path)
-                                    logger.debug(f"Loaded DSS private key from {key_path}")
-                                except Exception as e:
-                                    logger.error(f"Failed to load private key from {key_path}: {e}")
-                                    if self.server.password:
-                                        logger.info("Falling back to password authentication")
-                                        connect_kwargs['password'] = self.server.password
-                                    else:
-                                        raise Exception(f"Unable to load private key and no password provided: {e}")
-                    
-                    if private_key:
-                        connect_kwargs['pkey'] = private_key
-                        
-                except Exception as e:
-                    if self.server.password:
-                        logger.info("Private key failed, using password authentication")
-                        connect_kwargs['password'] = self.server.password
-                    else:
-                        raise Exception(f"Authentication failed: {e}")
-            elif self.server.password:
-                connect_kwargs['password'] = self.server.password
-            else:
-                raise Exception("No authentication method provided (password or private key required)")
-            
-            # Connect to SSH server
-            self.ssh_client.connect(**connect_kwargs)
+            # Use shared connection
+            self.shared_connection.connect()
             
             # Start port forwarding based on direction
             if self.port_forward.direction == 'remote':
@@ -205,7 +278,7 @@ class SSHTunnel(QObject):
             # Store the server socket for cleanup
             self.server_socket = server_socket
             
-            while not self.should_stop and self.ssh_client and self.ssh_client.get_transport() and self.ssh_client.get_transport().is_active():
+            while not self.should_stop and self.shared_connection.is_active():
                 try:
                     # Accept incoming connections
                     client_socket, addr = server_socket.accept()
@@ -248,10 +321,10 @@ class SSHTunnel(QObject):
     def _run_remote_tunnel(self):
         """Run remote port forwarding tunnel (SSH -R)"""
         try:
-            if not self.ssh_client or not self.ssh_client.get_transport():
+            if not self.shared_connection.is_active():
                 raise Exception("SSH connection not available")
             
-            transport = self.ssh_client.get_transport()
+            transport = self.shared_connection.ssh_client.get_transport()
             
             # Request remote port forwarding
             logger.info(f"Requesting remote port forward: {self.port_forward.local_host}:{self.port_forward.local_port} -> {self.port_forward.remote_host}:{self.port_forward.remote_port}")
@@ -268,7 +341,7 @@ class SSHTunnel(QObject):
             logger.info(f"Remote port forwarding established: {self.port_forward.local_host}:{self.port_forward.local_port} -> {self.port_forward.remote_host}:{self.port_forward.remote_port}")
             
             # Handle incoming connections from remote server
-            while not self.should_stop and self.ssh_client and self.ssh_client.get_transport() and self.ssh_client.get_transport().is_active():
+            while not self.should_stop and self.shared_connection.is_active():
                 try:
                     # Accept forwarded connections from the remote server
                     channel = transport.accept(timeout=1.0)
@@ -296,9 +369,9 @@ class SSHTunnel(QObject):
                 self._schedule_retry()
         finally:
             # Clean up remote forwarding
-            if self.remote_forward_request and self.ssh_client:
+            if self.remote_forward_request and self.shared_connection.ssh_client:
                 try:
-                    transport = self.ssh_client.get_transport()
+                    transport = self.shared_connection.ssh_client.get_transport()
                     if transport:
                         transport.cancel_port_forward(self.port_forward.local_host, self.port_forward.local_port)
                 except Exception as e:
@@ -310,12 +383,12 @@ class SSHTunnel(QObject):
         channel = None
         try:
             # Verify SSH transport is still active
-            if not self.ssh_client or not self.ssh_client.get_transport() or not self.ssh_client.get_transport().is_active():
+            if not self.shared_connection.is_active():
                 logger.error("SSH transport is not active")
                 return
             
             # Create SSH channel
-            transport = self.ssh_client.get_transport()
+            transport = self.shared_connection.ssh_client.get_transport()
             channel = transport.open_channel(
                 'direct-tcpip',
                 (self.port_forward.remote_host, self.port_forward.remote_port),
@@ -500,7 +573,7 @@ class SSHTunnel(QObject):
             # Store the server socket for cleanup
             self.server_socket = server_socket
             
-            while not self.should_stop and self.ssh_client and self.ssh_client.get_transport() and self.ssh_client.get_transport().is_active():
+            while not self.should_stop and self.shared_connection.is_active():
                 try:
                     # Accept incoming SOCKS connections
                     client_socket, addr = server_socket.accept()
@@ -584,7 +657,7 @@ class SSHTunnel(QObject):
             
             # Create SSH channel
             try:
-                transport = self.ssh_client.get_transport()
+                transport = self.shared_connection.ssh_client.get_transport()
                 channel = transport.open_channel('direct-tcpip', (addr, port), client_socket.getpeername())
                 
                 if not channel:
@@ -671,10 +744,10 @@ class SSHTunnel(QObject):
     def _run_reverse_dynamic_tunnel(self):
         """Run reverse dynamic SOCKS proxy tunnel (SSH -R + SOCKS handling)"""
         try:
-            if not self.ssh_client or not self.ssh_client.get_transport():
+            if not self.shared_connection.is_active():
                 raise Exception("SSH connection not available")
             
-            transport = self.ssh_client.get_transport()
+            transport = self.shared_connection.ssh_client.get_transport()
             
             # For reverse dynamic SOCKS:
             # 1. Set up remote port forwarding to expose a port on the SSH server
@@ -692,11 +765,11 @@ class SSHTunnel(QObject):
             if not self.remote_forward_request:
                 raise Exception(f"Failed to request reverse port forward on {self.port_forward.local_host}:{self.port_forward.local_port}")
             
-            logger.info(f"Reverse dynamic SOCKS established: Remote clients can connect to {self.server.host}:{self.port_forward.local_port}")
+            logger.info(f"Reverse dynamic SOCKS established: Remote clients can connect to {self.shared_connection.server.host}:{self.port_forward.local_port}")
             logger.info(f"Traffic will be forwarded back through SSH tunnel to local network")
             
             # Handle incoming connections from remote clients (they expect SOCKS proxy)
-            while not self.should_stop and self.ssh_client and self.ssh_client.get_transport() and self.ssh_client.get_transport().is_active():
+            while not self.should_stop and self.shared_connection.is_active():
                 try:
                     # Accept connections from remote clients to our "SOCKS proxy" on SSH server
                     channel = transport.accept(timeout=1.0)
@@ -724,9 +797,9 @@ class SSHTunnel(QObject):
                 self._schedule_retry()
         finally:
             # Clean up remote forwarding
-            if self.remote_forward_request and self.ssh_client:
+            if self.remote_forward_request and self.shared_connection.ssh_client:
                 try:
-                    transport = self.ssh_client.get_transport()
+                    transport = self.shared_connection.ssh_client.get_transport()
                     if transport:
                         transport.cancel_port_forward(self.port_forward.local_host, self.port_forward.local_port)
                 except Exception as e:
@@ -913,13 +986,41 @@ class SSHConnectionManager(QObject):
     def __init__(self):
         super().__init__()
         self.active_tunnels: Dict[int, SSHTunnel] = {}
+        self.shared_connections: Dict[str, SharedSSHConnection] = {}  # server_key -> connection
+    
+    def _get_or_create_shared_connection(self, server: Server) -> SharedSSHConnection:
+        """Get existing shared connection or create a new one"""
+        server_key = f"{server.host}:{server.port}:{server.username}"
+        
+        if server_key not in self.shared_connections:
+            self.shared_connections[server_key] = SharedSSHConnection(server)
+            logger.info(f"Created new shared SSH connection for {server_key}")
+        else:
+            logger.info(f"Reusing existing SSH connection for {server_key}")
+        
+        return self.shared_connections[server_key]
+    
+    def _cleanup_unused_connections(self):
+        """Clean up shared connections with no references"""
+        to_remove = []
+        for server_key, connection in self.shared_connections.items():
+            if connection.ref_count <= 0:
+                logger.info(f"Closing unused SSH connection for {server_key}")
+                connection.close()
+                to_remove.append(server_key)
+        
+        for server_key in to_remove:
+            del self.shared_connections[server_key]
     
     def start_tunnel(self, server: Server, port_forward: PortForward):
         """Start a port forwarding tunnel"""
         if port_forward.id in self.active_tunnels:
             self.stop_tunnel(port_forward.id)
         
-        tunnel = SSHTunnel(server, port_forward)
+        # Get or create shared connection for this server
+        shared_connection = self._get_or_create_shared_connection(server)
+        
+        tunnel = SSHTunnel(shared_connection, port_forward)
         tunnel.status_changed.connect(
             lambda status, pf_id=port_forward.id: self.tunnel_status_changed.emit(pf_id, status)
         )
@@ -936,12 +1037,20 @@ class SSHConnectionManager(QObject):
             tunnel = self.active_tunnels[port_forward_id]
             tunnel.stop()
             del self.active_tunnels[port_forward_id]
+            
+            # Clean up unused connections after stopping tunnel
+            self._cleanup_unused_connections()
     
     def stop_all_tunnels(self):
         """Stop all active tunnels"""
         for tunnel in list(self.active_tunnels.values()):
             tunnel.stop()
         self.active_tunnels.clear()
+        
+        # Close all shared connections
+        for connection in self.shared_connections.values():
+            connection.close()
+        self.shared_connections.clear()
     
     def get_tunnel_status(self, port_forward_id: int) -> str:
         """Get the current status of a tunnel"""
