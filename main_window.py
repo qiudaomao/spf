@@ -513,6 +513,13 @@ class MainWindow(QMainWindow):
         self.toggle_pf_btn = QPushButton("Enable/Disable")
         self.start_pf_btn = QPushButton("Start")
         self.stop_pf_btn = QPushButton("Stop")
+        self.start_all_btn = QPushButton("Start All")
+        self.stop_all_btn = QPushButton("Stop All")
+        
+        # Style the Start All and Stop All buttons to make them stand out
+        self.start_all_btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }")
+        self.stop_all_btn.setStyleSheet("QPushButton { background-color: #f44336; color: white; font-weight: bold; }")
+        
         pf_buttons.addWidget(self.add_pf_btn)
         pf_buttons.addWidget(self.edit_pf_btn)
         pf_buttons.addWidget(self.delete_pf_btn)
@@ -520,6 +527,8 @@ class MainWindow(QMainWindow):
         pf_buttons.addWidget(self.start_pf_btn)
         pf_buttons.addWidget(self.stop_pf_btn)
         pf_buttons.addStretch()
+        pf_buttons.addWidget(self.start_all_btn)
+        pf_buttons.addWidget(self.stop_all_btn)
         pf_layout.addLayout(pf_buttons)
         
         # Add panels to splitter
@@ -565,6 +574,8 @@ class MainWindow(QMainWindow):
         self.toggle_pf_btn.clicked.connect(self.toggle_port_forward)
         self.start_pf_btn.clicked.connect(self.start_port_forward)
         self.stop_pf_btn.clicked.connect(self.stop_port_forward)
+        self.start_all_btn.clicked.connect(self.start_all_port_forwards)
+        self.stop_all_btn.clicked.connect(self.stop_all_port_forwards)
         
         # SSH manager signals
         self.ssh_manager.tunnel_status_changed.connect(self.on_tunnel_status_changed)
@@ -826,6 +837,84 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Stopped tunnel: {pf_name}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to stop port forward: {str(e)}")
+    
+    def start_all_port_forwards(self):
+        """Start all enabled port forwards"""
+        port_forwards = self.db.get_port_forwards()
+        enabled_pfs = [pf for pf in port_forwards if pf.enabled]
+        
+        if not enabled_pfs:
+            QMessageBox.information(self, "No Port Forwards", "No enabled port forwards to start.")
+            return
+        
+        started_count = 0
+        failed_count = 0
+        port_conflicts = []
+        
+        # Check for port conflicts first
+        import socket
+        for pf in enabled_pfs:
+            test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                test_socket.bind(('127.0.0.1', pf.local_port))
+                test_socket.close()
+            except OSError:
+                port_conflicts.append(f"{pf.name} (port {pf.local_port})")
+        
+        # Show warning if there are port conflicts
+        if port_conflicts:
+            conflicts_text = "\\n".join(port_conflicts)
+            reply = QMessageBox.question(self, "Port Conflicts Detected", 
+                                       f"The following port forwards have port conflicts:\\n\\n{conflicts_text}\\n\\n"
+                                       f"Do you want to continue starting all enabled port forwards?\\n"
+                                       f"Conflicted tunnels may fail to start.",
+                                       QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.No:
+                return
+        
+        # Start all enabled port forwards
+        for pf in enabled_pfs:
+            try:
+                server = self.db.get_server(pf.server_id)
+                self.ssh_manager.start_tunnel(server, pf)
+                started_count += 1
+            except Exception as e:
+                failed_count += 1
+                print(f"Failed to start {pf.name}: {e}")
+        
+        self.statusBar().showMessage(f"Started {started_count} tunnels, {failed_count} failed")
+        
+        if failed_count > 0:
+            QMessageBox.warning(self, "Partial Success", 
+                              f"Started {started_count} port forwards successfully.\\n"
+                              f"{failed_count} port forwards failed to start. Check the log for details.")
+    
+    def stop_all_port_forwards(self):
+        """Stop all active port forwards"""
+        # Get all active tunnels from the SSH manager
+        active_tunnel_ids = list(self.ssh_manager.active_tunnels.keys())
+        
+        if not active_tunnel_ids:
+            QMessageBox.information(self, "No Active Tunnels", "No active tunnels to stop.")
+            return
+        
+        stopped_count = 0
+        failed_count = 0
+        
+        for pf_id in active_tunnel_ids:
+            try:
+                self.ssh_manager.stop_tunnel(pf_id)
+                stopped_count += 1
+            except Exception as e:
+                failed_count += 1
+                print(f"Failed to stop tunnel {pf_id}: {e}")
+        
+        self.statusBar().showMessage(f"Stopped {stopped_count} tunnels, {failed_count} failed")
+        
+        if failed_count > 0:
+            QMessageBox.warning(self, "Partial Success", 
+                              f"Stopped {stopped_count} tunnels successfully.\\n"
+                              f"{failed_count} tunnels failed to stop.")
     
     def on_tunnel_status_changed(self, pf_id, status):
         self.statusBar().showMessage(f"Tunnel {pf_id} status: {status}")
