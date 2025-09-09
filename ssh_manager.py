@@ -160,6 +160,9 @@ class SSHTunnel(QObject):
             elif self.port_forward.direction == 'dynamic':
                 # Dynamic SOCKS proxy (SSH -D)
                 self.tunnel_thread = threading.Thread(target=self._run_dynamic_tunnel, daemon=True)
+            elif self.port_forward.direction == 'reverse-dynamic':
+                # Reverse Dynamic SOCKS proxy (SSH -R with SOCKS)
+                self.tunnel_thread = threading.Thread(target=self._run_reverse_dynamic_tunnel, daemon=True)
             else:
                 # Local port forwarding (SSH -L) - default
                 self.tunnel_thread = threading.Thread(target=self._run_local_tunnel, daemon=True)
@@ -658,6 +661,226 @@ class SSHTunnel(QObject):
         finally:
             try:
                 client_socket.close()
+            except:
+                pass
+            try:
+                channel.close()
+            except:
+                pass
+    
+    def _run_reverse_dynamic_tunnel(self):
+        """Run reverse dynamic SOCKS proxy tunnel (SSH -R + SOCKS handling)"""
+        try:
+            if not self.ssh_client or not self.ssh_client.get_transport():
+                raise Exception("SSH connection not available")
+            
+            transport = self.ssh_client.get_transport()
+            
+            # For reverse dynamic SOCKS:
+            # 1. Set up remote port forwarding to expose a port on the SSH server
+            # 2. When clients connect to that port, they expect a SOCKS proxy
+            # 3. We handle the SOCKS protocol and forward destinations via SSH back to local network
+            
+            logger.info(f"Setting up reverse dynamic SOCKS on SSH server: {self.port_forward.local_host}:{self.port_forward.local_port}")
+            
+            # Request remote port forwarding - this exposes a port on the SSH server
+            self.remote_forward_request = transport.request_port_forward(
+                self.port_forward.local_host,  # Bind address on SSH server
+                self.port_forward.local_port   # Port on SSH server where SOCKS proxy will listen
+            )
+            
+            if not self.remote_forward_request:
+                raise Exception(f"Failed to request reverse port forward on {self.port_forward.local_host}:{self.port_forward.local_port}")
+            
+            logger.info(f"Reverse dynamic SOCKS established: Remote clients can connect to {self.server.host}:{self.port_forward.local_port}")
+            logger.info(f"Traffic will be forwarded back through SSH tunnel to local network")
+            
+            # Handle incoming connections from remote clients (they expect SOCKS proxy)
+            while not self.should_stop and self.ssh_client and self.ssh_client.get_transport() and self.ssh_client.get_transport().is_active():
+                try:
+                    # Accept connections from remote clients to our "SOCKS proxy" on SSH server
+                    channel = transport.accept(timeout=1.0)
+                    if channel:
+                        logger.info("Accepted reverse dynamic SOCKS client connection")
+                        # Handle this as a SOCKS connection from remote client
+                        handler_thread = threading.Thread(
+                            target=self._handle_reverse_socks_connection,
+                            args=(channel,),
+                            daemon=True
+                        )
+                        handler_thread.start()
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    if not self.should_stop:
+                        logger.error(f"Error handling reverse dynamic SOCKS connection: {e}")
+                        break
+            
+        except Exception as e:
+            logger.error(f"Reverse dynamic tunnel error: {e}")
+            self.error_occurred.emit(str(e))
+            if not self.should_stop:
+                self.status_changed.emit('error')
+                self._schedule_retry()
+        finally:
+            # Clean up remote forwarding
+            if self.remote_forward_request and self.ssh_client:
+                try:
+                    transport = self.ssh_client.get_transport()
+                    if transport:
+                        transport.cancel_port_forward(self.port_forward.local_host, self.port_forward.local_port)
+                except Exception as e:
+                    logger.debug(f"Error canceling reverse dynamic port forward: {e}")
+                self.remote_forward_request = None
+    
+    def _handle_reverse_socks_connection(self, channel):
+        """Handle reverse SOCKS5 connection from remote client"""
+        try:
+            # Handle SOCKS5 protocol - similar to regular SOCKS but from SSH channel
+            # The remote client connects to SSH server expecting a SOCKS proxy
+            
+            # Read SOCKS version
+            data = channel.recv(1)
+            if not data or data[0] != 5:
+                logger.error("Invalid SOCKS version from remote client")
+                channel.close()
+                return
+            
+            # Read authentication methods
+            nmethods_data = channel.recv(1)
+            if not nmethods_data:
+                channel.close()
+                return
+            nmethods = nmethods_data[0]
+            methods = channel.recv(nmethods)
+            
+            # Respond with no authentication required
+            channel.send(b'\x05\x00')
+            
+            # Read connection request
+            data = channel.recv(4)
+            if len(data) < 4:
+                channel.close()
+                return
+            
+            version, cmd, rsv, atyp = data
+            if version != 5 or cmd != 1:  # Only support CONNECT
+                channel.send(b'\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00')
+                channel.close()
+                return
+            
+            # Parse destination address
+            if atyp == 1:  # IPv4
+                addr_data = channel.recv(4)
+                if len(addr_data) < 4:
+                    channel.close()
+                    return
+                addr = socket.inet_ntoa(addr_data)
+            elif atyp == 3:  # Domain name
+                addr_len_data = channel.recv(1)
+                if not addr_len_data:
+                    channel.close()
+                    return
+                addr_len = addr_len_data[0]
+                addr_data = channel.recv(addr_len)
+                if len(addr_data) < addr_len:
+                    channel.close()
+                    return
+                addr = addr_data.decode()
+            else:
+                # Unsupported address type
+                channel.send(b'\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00')
+                channel.close()
+                return
+            
+            port_data = channel.recv(2)
+            if len(port_data) < 2:
+                channel.close()
+                return
+            port = int.from_bytes(port_data, 'big')
+            
+            # For reverse dynamic SOCKS, we connect to the local target directly
+            # (since we're on the local machine, we can reach local addresses directly)
+            local_socket = None
+            try:
+                local_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                local_socket.settimeout(10)
+                local_socket.connect((addr, port))
+                
+                # Success response
+                channel.send(b'\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00')
+                logger.info(f"Reverse SOCKS: Remote client → {addr}:{port} via local connection")
+                
+                # Forward data between remote client (via SSH channel) and local destination
+                self._forward_reverse_socks_data(channel, local_socket)
+                
+            except Exception as e:
+                logger.error(f"Reverse SOCKS connection failed: {e}")
+                try:
+                    channel.send(b'\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00')
+                except:
+                    pass
+                if local_socket:
+                    try:
+                        local_socket.close()
+                    except:
+                        pass
+                channel.close()
+                
+        except Exception as e:
+            logger.error(f"Reverse SOCKS handling error: {e}")
+            try:
+                channel.close()
+            except:
+                pass
+    
+    def _forward_reverse_socks_data(self, channel, local_socket):
+        """Forward data between remote SOCKS client (via channel) and local destination"""
+        try:
+            local_socket.settimeout(0.1)
+            channel.settimeout(0.1)
+            
+            while not self.should_stop and channel and not channel.closed:
+                try:
+                    ready_read, _, ready_error = select.select([local_socket, channel], [], [local_socket, channel], 1.0)
+                    
+                    if ready_error:
+                        break
+                    
+                    # Remote client (via channel) -> Local destination
+                    if channel in ready_read:
+                        try:
+                            data = channel.recv(4096)
+                            if not data:
+                                break
+                            local_socket.send(data)
+                        except socket.timeout:
+                            pass
+                        except Exception:
+                            break
+                    
+                    # Local destination -> Remote client (via channel)
+                    if local_socket in ready_read:
+                        try:
+                            data = local_socket.recv(4096)
+                            if not data:
+                                break
+                            channel.send(data)
+                        except socket.timeout:
+                            pass
+                        except Exception:
+                            break
+                            
+                except select.error:
+                    break
+                except Exception:
+                    break
+            
+        except Exception as e:
+            logger.debug(f"Reverse SOCKS forwarding error: {e}")
+        finally:
+            try:
+                local_socket.close()
             except:
                 pass
             try:

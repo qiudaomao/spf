@@ -267,6 +267,7 @@ class PortForwardDialog(QDialog):
         self.direction_combo.addItem("Local Forward (L → SSH → R)", "local")
         self.direction_combo.addItem("Remote Forward (R → SSH → L)", "remote") 
         self.direction_combo.addItem("Dynamic SOCKS Proxy", "dynamic")
+        self.direction_combo.addItem("Reverse Dynamic SOCKS", "reverse-dynamic")
         self.direction_combo.currentTextChanged.connect(self.on_direction_changed)
         direction_layout.addWidget(self.direction_combo)
         
@@ -364,6 +365,14 @@ class PortForwardDialog(QDialog):
                 "Remote host/port settings are not used for SOCKS proxies."
             )
             self.remote_group.setEnabled(False)
+            
+        elif direction == "reverse-dynamic":
+            self.direction_help.setText(
+                "Reverse Dynamic SOCKS: Creates a SOCKS5 proxy on the SSH server that forwards to local network.\n"
+                "Remote clients → SSH server:local_port (SOCKS proxy) → This local machine (via SSH tunnel)\n"
+                "Remote clients can connect to any destination accessible from this local machine."
+            )
+            self.remote_group.setEnabled(False)  # Not used for reverse-dynamic
     
     def load_port_forward_data(self):
         self.name_edit.setText(self.port_forward.name)
@@ -395,8 +404,8 @@ class PortForwardDialog(QDialog):
             direction=self.direction_combo.currentData(),
             local_host=self.local_host_edit.text().strip(),
             local_port=self.local_port_spin.value(),
-            remote_host=self.remote_host_edit.text().strip() if self.direction_combo.currentData() != "dynamic" else "",
-            remote_port=self.remote_port_spin.value() if self.direction_combo.currentData() != "dynamic" else 0,
+            remote_host=self.remote_host_edit.text().strip() if self.direction_combo.currentData() not in ["dynamic", "reverse-dynamic"] else "",
+            remote_port=self.remote_port_spin.value() if self.direction_combo.currentData() not in ["dynamic", "reverse-dynamic"] else 0,
             enabled=self.enabled_check.isChecked(),
             auto_start=self.auto_start_check.isChecked()
         )
@@ -409,7 +418,7 @@ class PortForwardDialog(QDialog):
             return
         
         # Additional validation for non-dynamic forwards
-        if pf_data.direction != "dynamic" and not pf_data.remote_host:
+        if pf_data.direction not in ["dynamic", "reverse-dynamic"] and not pf_data.remote_host:
             QMessageBox.warning(self, "Validation Error", "Remote host is required for this tunnel type.")
             return
         
@@ -595,14 +604,15 @@ class MainWindow(QMainWindow):
             direction_display = {
                 'local': 'Local (L)',
                 'remote': 'Remote (R)', 
-                'dynamic': 'Dynamic (D)'
+                'dynamic': 'Dynamic (D)',
+                'reverse-dynamic': 'Rev-Dynamic (RD)'
             }.get(pf.direction, 'Local (L)')
             
             self.pf_table.setItem(row, 0, QTableWidgetItem(pf.name))
             self.pf_table.setItem(row, 1, QTableWidgetItem(server_name))
             self.pf_table.setItem(row, 2, QTableWidgetItem(direction_display))
             self.pf_table.setItem(row, 3, QTableWidgetItem(f"{pf.local_host}:{pf.local_port}"))
-            self.pf_table.setItem(row, 4, QTableWidgetItem(f"{pf.remote_host}:{pf.remote_port}" if pf.direction != 'dynamic' else "N/A"))
+            self.pf_table.setItem(row, 4, QTableWidgetItem(f"{pf.remote_host}:{pf.remote_port}" if pf.direction not in ['dynamic', 'reverse-dynamic'] else "N/A"))
             
             status = self.ssh_manager.get_tunnel_status(pf.id)
             self.pf_table.setItem(row, 5, QTableWidgetItem(status))
