@@ -433,6 +433,9 @@ class SSHTunnel(QObject):
             logger.info(f"Requesting remote port forward: {self.port_forward.local_host}:{self.port_forward.local_port} -> {self.port_forward.remote_host}:{self.port_forward.remote_port}")
             
             # Request port forwarding on the remote server
+            logger.info(f"Requesting remote port forward: bind to {self.port_forward.local_host}:{self.port_forward.local_port} on SSH server")
+            logger.info(f"Traffic from SSH server will be forwarded to: {self.port_forward.remote_host}:{self.port_forward.remote_port}")
+            
             self.remote_forward_request = transport.request_port_forward(
                 self.port_forward.local_host, 
                 self.port_forward.local_port
@@ -440,6 +443,14 @@ class SSHTunnel(QObject):
             
             if not self.remote_forward_request:
                 raise Exception(f"Failed to request remote port forward on {self.port_forward.local_host}:{self.port_forward.local_port}")
+            
+            # Add warning about SSH server configuration
+            if self.port_forward.local_host not in ['0.0.0.0', '']:
+                logger.warning(f"Remote port forward requested bind address: {self.port_forward.local_host}")
+                logger.warning("Actual bind address depends on SSH server's 'GatewayPorts' setting:")
+                logger.warning("  GatewayPorts no (default): binds to localhost only")  
+                logger.warning("  GatewayPorts yes: binds to 0.0.0.0 (all interfaces)")
+                logger.warning("  GatewayPorts clientspecified: honors client request")
             
             logger.info(f"Remote port forwarding established: {self.port_forward.local_host}:{self.port_forward.local_port} -> {self.port_forward.remote_host}:{self.port_forward.remote_port}")
             

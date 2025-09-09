@@ -354,7 +354,8 @@ class PortForwardDialog(QDialog):
         elif direction == "remote":
             self.direction_help.setText(
                 "Remote Forward: Connections to SSH server's port are forwarded back to local host:port.\n"
-                "Example: Remote users → SSH server:remote_port → SSH tunnel → local_host:local_port"
+                "Example: Remote users → SSH server:remote_port → SSH tunnel → local_host:local_port\n"
+                "Note: Actual bind address on SSH server depends on server's 'GatewayPorts' setting."
             )
             self.remote_group.setEnabled(True)
             self.remote_host_edit.setPlaceholderText("Local target host (usually localhost)")

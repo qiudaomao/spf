@@ -15,6 +15,7 @@ Features:
 import sys
 import os
 import logging
+import argparse
 from PyQt5.QtWidgets import QApplication, QMessageBox
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QIcon
@@ -38,7 +39,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class SSHPortForwarderApp(QApplication):
-    def __init__(self, sys_argv):
+    def __init__(self, sys_argv, start_minimized=False):
         super().__init__(sys_argv)
         
         # Set application properties
@@ -46,6 +47,9 @@ class SSHPortForwarderApp(QApplication):
         self.setApplicationVersion("1.0.0")
         self.setOrganizationName("SSH Tools")
         self.setOrganizationDomain("sshtools.local")
+        
+        # Store startup mode
+        self.start_minimized = start_minimized
         
         # Initialize components
         self.db_manager = None
@@ -103,8 +107,21 @@ class SSHPortForwarderApp(QApplication):
             self.tray_update_timer.timeout.connect(self.update_tray_status)
             self.tray_update_timer.start(5000)  # Update every 5 seconds
             
-            # Show main window initially
-            self.main_window.show()
+            # Handle startup mode
+            if self.start_minimized:
+                # Started minimized (auto-start mode) - don't show main window
+                logger.info("Starting in minimized mode (auto-start)")
+                self.system_tray.show_message(
+                    "SSH Port Forwarder",
+                    "Application started in background mode. Auto-starting configured tunnels...",
+                    self.system_tray.tray_icon.Information
+                )
+                # Auto-start the tunnels after a short delay
+                QTimer.singleShot(3000, self.auto_start_tunnels_minimized)
+            else:
+                # Normal startup - show main window
+                self.main_window.show()
+                logger.info("Starting with main window visible")
             
             logger.info("Application setup completed successfully")
             
@@ -113,6 +130,32 @@ class SSHPortForwarderApp(QApplication):
             QMessageBox.critical(None, "Startup Error", 
                                f"Failed to initialize application:\n{str(e)}")
             sys.exit(1)
+    
+    def auto_start_tunnels_minimized(self):
+        """Auto-start configured tunnels when running in minimized mode"""
+        if self.db_manager and self.ssh_manager:
+            auto_start_pfs = self.db_manager.get_auto_start_port_forwards()
+            servers = {s.id: s for s in self.db_manager.get_servers()}
+            
+            started_count = 0
+            for pf in auto_start_pfs:
+                if pf.server_id in servers:
+                    try:
+                        self.ssh_manager.start_tunnel(servers[pf.server_id], pf)
+                        started_count += 1
+                        logger.info(f"Auto-started tunnel: {pf.name}")
+                    except Exception as e:
+                        logger.error(f"Failed to auto-start tunnel {pf.name}: {e}")
+            
+            if started_count > 0:
+                self.system_tray.show_message(
+                    "Tunnels Started",
+                    f"Successfully started {started_count} auto-start tunnel(s)",
+                    self.system_tray.tray_icon.Information
+                )
+                logger.info(f"Auto-started {started_count} tunnels in background mode")
+            else:
+                logger.info("No auto-start tunnels configured or all failed to start")
     
     def show_main_window(self):
         """Show and raise the main window"""
@@ -185,19 +228,28 @@ class SSHPortForwarderApp(QApplication):
 
 def main():
     """Main entry point"""
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='SSH Port Forwarder - Manage SSH tunnels with GUI')
+    parser.add_argument('--minimized', action='store_true', 
+                       help='Start minimized to system tray (used for auto-start)')
+    args = parser.parse_args()
+    
     # Handle high DPI displays
     if hasattr(Qt, 'AA_EnableHighDpiScaling'):
         QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
         QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     
-    # Create and run application
-    app = SSHPortForwarderApp(sys.argv)
+    # Create and run application with startup mode
+    app = SSHPortForwarderApp(sys.argv, start_minimized=args.minimized)
     
     # Set application icon
     app.setWindowIcon(QIcon())
     
-    logger.info("Starting SSH Port Forwarder application...")
+    if args.minimized:
+        logger.info("Starting SSH Port Forwarder application in minimized mode...")
+    else:
+        logger.info("Starting SSH Port Forwarder application...")
     
     try:
         sys.exit(app.exec_())

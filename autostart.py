@@ -10,15 +10,15 @@ class AutoStartManager:
         self.is_windows = platform.system() == "Windows"
     
     def get_executable_path(self):
-        """Get the path to the current executable or script"""
+        """Get the path to the current executable or script with --minimized flag"""
         if getattr(sys, 'frozen', False):
             # Running as compiled executable
-            return sys.executable
+            return f'"{sys.executable}" --minimized'
         else:
             # Running as Python script
             python_exe = sys.executable
             script_path = os.path.abspath(sys.argv[0])
-            return f'"{python_exe}" "{script_path}"'
+            return f'"{python_exe}" "{script_path}" --minimized'
     
     def is_auto_start_enabled(self):
         """Check if auto-start is currently enabled"""
