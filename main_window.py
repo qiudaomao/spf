@@ -488,10 +488,12 @@ class MainWindow(QMainWindow):
         
         # Port forwards table
         self.pf_table = QTableWidget()
-        self.pf_table.setColumnCount(7)
-        self.pf_table.setHorizontalHeaderLabels(["Name", "Server", "Local Port", "Remote", "Status", "Enabled", "Auto Start"])
+        self.pf_table.setColumnCount(8)
+        self.pf_table.setHorizontalHeaderLabels(["Name", "Server", "Direction", "Local", "Remote", "Status", "Enabled", "Auto Start"])
         self.pf_table.horizontalHeader().setStretchLastSection(True)
         self.pf_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.pf_table.setEditTriggers(QTableWidget.NoEditTriggers)  # Make table uneditable
+        self.pf_table.doubleClicked.connect(self.edit_port_forward)  # Double-click to edit
         pf_layout.addWidget(self.pf_table)
         
         # Port forward buttons
@@ -589,15 +591,23 @@ class MainWindow(QMainWindow):
         for row, pf in enumerate(port_forwards):
             server_name = servers[pf.server_id].name if pf.server_id in servers else "Unknown"
             
+            # Direction display
+            direction_display = {
+                'local': 'Local (L)',
+                'remote': 'Remote (R)', 
+                'dynamic': 'Dynamic (D)'
+            }.get(pf.direction, 'Local (L)')
+            
             self.pf_table.setItem(row, 0, QTableWidgetItem(pf.name))
             self.pf_table.setItem(row, 1, QTableWidgetItem(server_name))
-            self.pf_table.setItem(row, 2, QTableWidgetItem(str(pf.local_port)))
-            self.pf_table.setItem(row, 3, QTableWidgetItem(f"{pf.remote_host}:{pf.remote_port}"))
+            self.pf_table.setItem(row, 2, QTableWidgetItem(direction_display))
+            self.pf_table.setItem(row, 3, QTableWidgetItem(f"{pf.local_host}:{pf.local_port}"))
+            self.pf_table.setItem(row, 4, QTableWidgetItem(f"{pf.remote_host}:{pf.remote_port}" if pf.direction != 'dynamic' else "N/A"))
             
             status = self.ssh_manager.get_tunnel_status(pf.id)
-            self.pf_table.setItem(row, 4, QTableWidgetItem(status))
-            self.pf_table.setItem(row, 5, QTableWidgetItem("Yes" if pf.enabled else "No"))
-            self.pf_table.setItem(row, 6, QTableWidgetItem("Yes" if pf.auto_start else "No"))
+            self.pf_table.setItem(row, 5, QTableWidgetItem(status))
+            self.pf_table.setItem(row, 6, QTableWidgetItem("Yes" if pf.enabled else "No"))
+            self.pf_table.setItem(row, 7, QTableWidgetItem("Yes" if pf.auto_start else "No"))
             
             # Store port forward ID in first column
             self.pf_table.item(row, 0).setData(Qt.UserRole, pf.id)
@@ -608,10 +618,10 @@ class MainWindow(QMainWindow):
             pf_id = self.pf_table.item(row, 0).data(Qt.UserRole)
             if pf_id:
                 status = self.ssh_manager.get_tunnel_status(pf_id)
-                self.pf_table.setItem(row, 4, QTableWidgetItem(status))
+                self.pf_table.setItem(row, 5, QTableWidgetItem(status))
                 
                 # Color code the status
-                status_item = self.pf_table.item(row, 4)
+                status_item = self.pf_table.item(row, 5)
                 if status == 'connected':
                     status_item.setBackground(QColor(144, 238, 144))  # Light green
                 elif status == 'connecting':

@@ -157,6 +157,9 @@ class SSHTunnel(QObject):
             if self.port_forward.direction == 'remote':
                 # Remote port forwarding (SSH -R)
                 self.tunnel_thread = threading.Thread(target=self._run_remote_tunnel, daemon=True)
+            elif self.port_forward.direction == 'dynamic':
+                # Dynamic SOCKS proxy (SSH -D)
+                self.tunnel_thread = threading.Thread(target=self._run_dynamic_tunnel, daemon=True)
             else:
                 # Local port forwarding (SSH -L) - default
                 self.tunnel_thread = threading.Thread(target=self._run_local_tunnel, daemon=True)
@@ -466,6 +469,199 @@ class SSHTunnel(QObject):
             try:
                 if channel:
                     channel.close()
+            except:
+                pass
+    
+    def _run_dynamic_tunnel(self):
+        """Run dynamic SOCKS proxy tunnel (SSH -D)"""
+        server_socket = None
+        try:
+            # Create a server socket for SOCKS proxy
+            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
+            # Try to bind to the local port
+            try:
+                server_socket.bind((self.port_forward.local_host, self.port_forward.local_port))
+            except OSError as e:
+                if e.errno == 48:  # Address already in use
+                    raise Exception(f"Port {self.port_forward.local_port} is already in use")
+                else:
+                    raise Exception(f"Failed to bind to port {self.port_forward.local_port}: {e}")
+            
+            server_socket.listen(5)
+            server_socket.settimeout(1.0)  # Non-blocking accept
+            
+            logger.info(f"SOCKS proxy started on: {self.port_forward.local_host}:{self.port_forward.local_port}")
+            
+            # Store the server socket for cleanup
+            self.server_socket = server_socket
+            
+            while not self.should_stop and self.ssh_client and self.ssh_client.get_transport() and self.ssh_client.get_transport().is_active():
+                try:
+                    # Accept incoming SOCKS connections
+                    client_socket, addr = server_socket.accept()
+                    logger.info(f"Accepted SOCKS connection from {addr}")
+                    
+                    # Create a new thread to handle this SOCKS connection
+                    handler_thread = threading.Thread(
+                        target=self._handle_socks_connection,
+                        args=(client_socket,),
+                        daemon=True
+                    )
+                    handler_thread.start()
+                    
+                except socket.timeout:
+                    continue
+                except OSError as e:
+                    if not self.should_stop:
+                        logger.error(f"Error accepting SOCKS connection: {e}")
+                        break
+                except Exception as e:
+                    if not self.should_stop:
+                        logger.error(f"Error accepting SOCKS connection: {e}")
+                        break
+            
+        except Exception as e:
+            logger.error(f"Dynamic tunnel error: {e}")
+            self.error_occurred.emit(str(e))
+            if not self.should_stop:
+                self.status_changed.emit('error')
+                self._schedule_retry()
+        finally:
+            # Clean up server socket
+            if server_socket:
+                try:
+                    server_socket.close()
+                except:
+                    pass
+            self.server_socket = None
+    
+    def _handle_socks_connection(self, client_socket):
+        """Handle SOCKS5 proxy connection"""
+        try:
+            # Simple SOCKS5 implementation
+            # Read SOCKS version
+            data = client_socket.recv(1)
+            if not data or data[0] != 5:
+                client_socket.close()
+                return
+            
+            # Read authentication methods
+            nmethods = client_socket.recv(1)[0]
+            methods = client_socket.recv(nmethods)
+            
+            # Respond with no authentication required
+            client_socket.send(b'\x05\x00')
+            
+            # Read connection request  
+            data = client_socket.recv(4)
+            if len(data) < 4:
+                client_socket.close()
+                return
+            
+            version, cmd, rsv, atyp = data
+            if version != 5 or cmd != 1:  # Only support CONNECT
+                client_socket.send(b'\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00')
+                client_socket.close()
+                return
+            
+            # Parse destination address
+            if atyp == 1:  # IPv4
+                addr = socket.inet_ntoa(client_socket.recv(4))
+            elif atyp == 3:  # Domain name
+                addr_len = client_socket.recv(1)[0]
+                addr = client_socket.recv(addr_len).decode()
+            else:
+                client_socket.send(b'\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00')
+                client_socket.close()
+                return
+            
+            port = int.from_bytes(client_socket.recv(2), 'big')
+            
+            # Create SSH channel
+            try:
+                transport = self.ssh_client.get_transport()
+                channel = transport.open_channel('direct-tcpip', (addr, port), client_socket.getpeername())
+                
+                if not channel:
+                    client_socket.send(b'\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00')
+                    client_socket.close()
+                    return
+                
+                # Success response
+                client_socket.send(b'\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00')
+                logger.info(f"SOCKS tunnel: {client_socket.getpeername()} -> {addr}:{port}")
+                
+                # Forward data
+                self._forward_socks_data(client_socket, channel)
+                
+            except Exception as e:
+                logger.error(f"SOCKS connection failed: {e}")
+                try:
+                    client_socket.send(b'\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00')
+                except:
+                    pass
+                client_socket.close()
+                
+        except Exception as e:
+            logger.error(f"SOCKS handling error: {e}")
+            try:
+                client_socket.close()
+            except:
+                pass
+    
+    def _forward_socks_data(self, client_socket, channel):
+        """Forward data between SOCKS client and SSH channel"""
+        try:
+            client_socket.settimeout(0.1)
+            channel.settimeout(0.1)
+            
+            while not self.should_stop and channel and not channel.closed:
+                try:
+                    ready_read, _, ready_error = select.select([client_socket, channel], [], [client_socket, channel], 1.0)
+                    
+                    if ready_error:
+                        break
+                    
+                    # Client -> Remote
+                    if client_socket in ready_read:
+                        try:
+                            data = client_socket.recv(4096)
+                            if not data:
+                                break
+                            channel.send(data)
+                        except socket.timeout:
+                            pass
+                        except Exception:
+                            break
+                    
+                    # Remote -> Client
+                    if channel in ready_read:
+                        try:
+                            data = channel.recv(4096)
+                            if not data:
+                                break
+                            client_socket.send(data)
+                        except socket.timeout:
+                            pass
+                        except Exception:
+                            break
+                            
+                except select.error:
+                    break
+                except Exception:
+                    break
+            
+        except Exception as e:
+            logger.debug(f"SOCKS forwarding error: {e}")
+        finally:
+            try:
+                client_socket.close()
+            except:
+                pass
+            try:
+                channel.close()
             except:
                 pass
     
