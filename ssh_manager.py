@@ -22,6 +22,9 @@ class SharedSSHConnection(QObject):
         self.ref_count = 0
         self.is_connected = False
         self.connection_lock = threading.RLock()
+        self._heartbeat_thread = None
+        self._heartbeat_stop = False
+        self._last_heartbeat = time.time()
         
     def get_server_key(self) -> str:
         """Generate a unique key for the server configuration"""
@@ -99,10 +102,22 @@ class SharedSSHConnection(QObject):
                 else:
                     raise Exception("No authentication method provided (password or private key required)")
                 
-                # Connect to SSH server
+                # Connect to SSH server with keepalive settings
+                connect_kwargs['timeout'] = 10
+                # Enable TCP keepalive
                 self.ssh_client.connect(**connect_kwargs)
+                
+                # Configure SSH keepalive settings
+                transport = self.ssh_client.get_transport()
+                if transport:
+                    transport.set_keepalive(30)  # Send keepalive every 30 seconds
+                    transport.use_compression(False)  # Disable compression for better performance
+                
                 self.is_connected = True
                 logger.info(f"SSH connection established to {self.server.host}:{self.server.port}")
+                
+                # Start heartbeat monitoring
+                self._start_heartbeat_monitor()
                 return True
                 
             except Exception as e:
@@ -115,6 +130,75 @@ class SharedSSHConnection(QObject):
                         pass
                     self.ssh_client = None
                 raise e
+    
+    def _start_heartbeat_monitor(self):
+        """Start heartbeat monitoring thread"""
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+            return
+            
+        self._heartbeat_stop = False
+        self._last_heartbeat = time.time()
+        self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self._heartbeat_thread.start()
+        logger.debug("Started SSH heartbeat monitor")
+    
+    def _heartbeat_loop(self):
+        """Heartbeat monitoring loop"""
+        while not self._heartbeat_stop and self.is_connected:
+            try:
+                time.sleep(15)  # Check every 15 seconds
+                
+                if self._heartbeat_stop:
+                    break
+                    
+                with self.connection_lock:
+                    if not self.ssh_client or not self.ssh_client.get_transport():
+                        logger.warning("SSH transport lost during heartbeat check")
+                        self._handle_connection_lost()
+                        break
+                    
+                    transport = self.ssh_client.get_transport()
+                    if not transport.is_active():
+                        logger.warning("SSH transport is no longer active")
+                        self._handle_connection_lost()
+                        break
+                    
+                    # Send a simple command to test the connection
+                    try:
+                        # Use a lightweight command that should always work
+                        stdin, stdout, stderr = self.ssh_client.exec_command('echo heartbeat', timeout=10)
+                        stdout.read()  # Read the response
+                        stdout.close()
+                        stderr.close()
+                        stdin.close()
+                        self._last_heartbeat = time.time()
+                        logger.debug("SSH heartbeat successful")
+                    except Exception as e:
+                        logger.warning(f"SSH heartbeat failed: {e}")
+                        self._handle_connection_lost()
+                        break
+                        
+            except Exception as e:
+                logger.error(f"Error in heartbeat monitor: {e}")
+                self._handle_connection_lost()
+                break
+        
+        logger.debug("SSH heartbeat monitor stopped")
+    
+    def _handle_connection_lost(self):
+        """Handle lost connection"""
+        logger.error("SSH connection lost, notifying tunnels")
+        with self.connection_lock:
+            self.is_connected = False
+            if self.ssh_client:
+                try:
+                    self.ssh_client.close()
+                except:
+                    pass
+                self.ssh_client = None
+        
+        # Emit signal to notify tunnels
+        self.connection_lost.emit()
     
     def add_ref(self):
         """Add a reference to this connection"""
@@ -130,6 +214,11 @@ class SharedSSHConnection(QObject):
     def close(self):
         """Close the SSH connection"""
         with self.connection_lock:
+            # Stop heartbeat monitor
+            self._heartbeat_stop = True
+            if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+                self._heartbeat_thread.join(timeout=2)
+            
             if self.ssh_client:
                 try:
                     self.ssh_client.close()
@@ -139,12 +228,25 @@ class SharedSSHConnection(QObject):
             self.is_connected = False
     
     def is_active(self):
-        """Check if connection is active"""
+        """Check if connection is active with additional validation"""
         with self.connection_lock:
-            return (self.is_connected and 
-                   self.ssh_client and 
-                   self.ssh_client.get_transport() and 
-                   self.ssh_client.get_transport().is_active())
+            if not self.is_connected or not self.ssh_client:
+                return False
+                
+            try:
+                transport = self.ssh_client.get_transport()
+                if not transport or not transport.is_active():
+                    return False
+                
+                # Check if heartbeat is recent (within last 60 seconds)
+                if time.time() - self._last_heartbeat > 60:
+                    logger.warning("SSH connection appears stale (no recent heartbeat)")
+                    return False
+                    
+                return True
+            except Exception as e:
+                logger.debug(f"Error checking SSH connection status: {e}")
+                return False
 
 class SSHTunnel(QObject):
     status_changed = pyqtSignal(str)  # 'connected', 'disconnected', 'error', 'connecting'
@@ -168,8 +270,9 @@ class SSHTunnel(QObject):
         self.retry_timer.timeout.connect(self.retry_connection)
         self.retry_timer.setSingleShot(True)
         
-        # Add reference to shared connection
+        # Add reference to shared connection and connect to connection lost signal
         self.shared_connection.add_ref()
+        self.shared_connection.connection_lost.connect(self._handle_connection_lost)
         
     def start(self):
         """Start the SSH tunnel"""
@@ -972,6 +1075,13 @@ class SSHTunnel(QObject):
         retry_delay = min(self.retry_delay * self.retry_count, 60)  # Max 60 seconds
         logger.info(f"Scheduling retry {self.retry_count}/{self.max_retries} in {retry_delay} seconds")
         self.retry_timer.start(retry_delay * 1000)
+    
+    def _handle_connection_lost(self):
+        """Handle when shared connection is lost"""
+        logger.warning(f"SSH connection lost for tunnel {self.port_forward.id}")
+        if not self.should_stop:
+            self.status_changed.emit('error')
+            self._schedule_retry()
     
     def retry_connection(self):
         """Retry the connection"""
