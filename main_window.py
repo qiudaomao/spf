@@ -11,6 +11,7 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread
 from PyQt5.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
 from database import DatabaseManager, Server, PortForward
 from ssh_manager import SSHConnectionManager
+from autostart import AutoStartManager
 
 class ServerDialog(QDialog):
     def __init__(self, parent=None, server=None):
@@ -438,10 +439,20 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.db = DatabaseManager()
         self.ssh_manager = SSHConnectionManager()
-        self.autostart_manager = None
+        
+        # Initialize auto-start manager
+        try:
+            self.autostart_manager = AutoStartManager()
+        except Exception as e:
+            print(f"Warning: Auto-start manager initialization failed: {e}")
+            self.autostart_manager = None
+        
         self.setup_ui()
         self.setup_connections()
         self.load_data()
+        
+        # Update autostart menu state
+        self.update_autostart_menu()
         
         # Status update timer
         self.status_timer = QTimer()
@@ -943,8 +954,27 @@ class MainWindow(QMainWindow):
             self.autostart_action.setText("Disable Auto-start" if is_enabled else "Enable Auto-start")
     
     def toggle_autostart(self):
-        """Toggle Windows auto-start functionality - will be overridden by main app"""
-        QMessageBox.information(self, "Auto-start", "Auto-start functionality not implemented yet.")
+        """Toggle Windows auto-start functionality"""
+        if not self.autostart_manager:
+            QMessageBox.warning(self, "Auto-start Unavailable", 
+                              "Auto-start functionality is not available on this system.")
+            return
+        
+        try:
+            if self.autostart_manager.is_auto_start_enabled():
+                self.autostart_manager.disable_auto_start()
+                QMessageBox.information(self, "Auto-start Disabled", 
+                                      "Application will no longer start automatically at Windows boot.")
+            else:
+                self.autostart_manager.enable_auto_start()
+                QMessageBox.information(self, "Auto-start Enabled", 
+                                      "Application will now start automatically at Windows boot.")
+            
+            # Update the menu item
+            self.update_autostart_menu()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Auto-start Error", f"Failed to toggle auto-start:\n{str(e)}")
     
     def closeEvent(self, event):
         # Stop all active tunnels
